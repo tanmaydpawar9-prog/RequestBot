@@ -6,6 +6,7 @@ import logging
 import random
 import psycopg2
 import psycopg2.extras
+import re
 from dotenv import load_dotenv
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -15,7 +16,6 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-import traceback # Moved here to ensure it's available for global_error_handler
 from typing import Optional # Added for extract_channel_short_name_from_filename
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
