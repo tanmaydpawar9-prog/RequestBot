@@ -130,10 +130,14 @@ async def handle_start(message: Message, command: CommandStart):
     ])
     
     if ad_msg_id and ad_channel_id:
-        await bot.copy_message(
+        await bot.forward_message(
             chat_id=user_id,
             from_chat_id=ad_channel_id,
-            message_id=ad_msg_id,
+            message_id=ad_msg_id
+        )
+        await message.answer(
+            "👆 <b>Please click the ad above to verify!</b>\n\n"
+            "After verifying, click the button below to get your file.",
             reply_markup=keyboard
         )
     else:
