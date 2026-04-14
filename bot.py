@@ -50,6 +50,9 @@ if DATABASE_URL:
             if not cursor.fetchone():
                 cursor.execute("ALTER TABLE requests ADD COLUMN user_msg_id BIGINT")
                 cursor.execute("ALTER TABLE requests ADD COLUMN bot_fwd_msg_id BIGINT")
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='requests' AND column_name='bot_reply_msg_id'")
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE requests ADD COLUMN bot_reply_msg_id BIGINT")
 else:
     logging.error("DATABASE_URL is not set! Data will not be saved.")
 
@@ -76,6 +79,30 @@ async def delete_message_later(chat_id: int, message_id: int, delay: int):
         await bot.delete_message(chat_id, message_id)
     except Exception as e:
         logging.error(f"Failed to delete delayed message: {e}")
+
+async def cleanup_unclicked_request(request_key: str, chat_id: int):
+    """Deletes request messages if user hasn't clicked anything after 1 minute."""
+    await asyncio.sleep(60) # Wait for 1 minute
+
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT verified, bot_fwd_msg_id, bot_reply_msg_id FROM requests WHERE request_key = %s", (request_key,))
+            req = cursor.fetchone()
+
+            if req and not req['verified']: # If request exists and is still unverified
+                logging.info(f"Cleaning up unclicked request {request_key} for user {chat_id}")
+                
+                # Delete bot's messages
+                if req['bot_fwd_msg_id']:
+                    try: await bot.delete_message(chat_id, req['bot_fwd_msg_id'])
+                    except (TelegramNotFound, TelegramBadRequest): pass # Already deleted or invalid
+                    except Exception as e: logging.error(f"Error deleting forwarded ad for {chat_id}: {e}")
+                if req['bot_reply_msg_id']:
+                    try: await bot.delete_message(chat_id, req['bot_reply_msg_id'])
+                    except (TelegramNotFound, TelegramBadRequest): pass # Already deleted or invalid
+                    except Exception as e: logging.error(f"Error deleting bot reply for {chat_id}: {e}")
+                
+                cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,))
 
 # --- Telegram Bot Handlers ---
 
@@ -208,8 +235,8 @@ async def handle_start(message: Message, command: CommandStart):
     ad_channel_id = None
     
     fwd_msg_id = None
-    user_msg_id = message.message_id
-
+    user_msg_id = message.message_id # The /start message from the user
+    bot_reply_msg_id = None # The bot's message with the inline buttons
     max_ad_attempts = 5 # Prevent infinite loops if all ads are bad
     attempt_count = 0
     
@@ -270,7 +297,7 @@ async def handle_start(message: Message, command: CommandStart):
         [InlineKeyboardButton(text="1️⃣ Click Ad to Verify", url=track_url)],
         [InlineKeyboardButton(text="2️⃣ Get Subtitle File", callback_data=f"get_{file_hash}")]
     ])
-    
+
     if ad_msg_id and ad_channel_id:
         await message.answer(
             "<b>Verification Required</b>\n\n"
@@ -278,21 +305,30 @@ async def handle_start(message: Message, command: CommandStart):
             "After verifying, click 'Get Subtitle File' to receive your file.",
             reply_markup=keyboard
         )
+        bot_reply_msg_id = (await message.answer(
+            "<b>Verification Required</b>\n\n"
+            "Please click the 'Click Ad to Verify' button below.\n"
+            "After verifying, click 'Get Subtitle File' to receive your file.",
+            reply_markup=keyboard
+        )).message_id
     else:
-        await message.answer(
+        bot_reply_msg_id = (await message.answer(
             f"<b>Verification Required</b>\n\n"
             f"Please click the verification button below.\n\n"
             f"<i>(No specific ad available at the moment.)</i>",
             reply_markup=keyboard
-        )
-        
+        )).message_id
+
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
-                INSERT INTO requests (request_key, verified, timestamp, target_url, user_msg_id, bot_fwd_msg_id) 
-                VALUES (%s, 0, %s, %s, %s, %s)
-                ON CONFLICT(request_key) DO UPDATE SET verified = 0, timestamp = EXCLUDED.timestamp, target_url = EXCLUDED.target_url, user_msg_id = EXCLUDED.user_msg_id, bot_fwd_msg_id = EXCLUDED.bot_fwd_msg_id
-            """, (request_key, time.time(), ad_url, user_msg_id, fwd_msg_id))
+                INSERT INTO requests (request_key, verified, timestamp, target_url, user_msg_id, bot_fwd_msg_id, bot_reply_msg_id) 
+                VALUES (%s, 0, %s, %s, %s, %s, %s)
+                ON CONFLICT(request_key) DO UPDATE SET verified = 0, timestamp = EXCLUDED.timestamp, target_url = EXCLUDED.target_url, user_msg_id = EXCLUDED.user_msg_id, bot_fwd_msg_id = EXCLUDED.bot_fwd_msg_id, bot_reply_msg_id = EXCLUDED.bot_reply_msg_id
+            """, (request_key, time.time(), ad_url, user_msg_id, fwd_msg_id, bot_reply_msg_id))
+    
+    # Schedule cleanup if user doesn't interact
+    asyncio.create_task(cleanup_unclicked_request(request_key, user_id))
 
 @dp.callback_query(F.data.startswith("get_"))
 async def serve_file(callback: CallbackQuery):
@@ -304,6 +340,7 @@ async def serve_file(callback: CallbackQuery):
     file_id = None
     user_msg_id = None
     bot_fwd_msg_id = None
+    bot_reply_msg_id = None
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute("SELECT verified, timestamp, user_msg_id, bot_fwd_msg_id FROM requests WHERE request_key = %s", (request_key,))
@@ -321,6 +358,7 @@ async def serve_file(callback: CallbackQuery):
                 
             user_msg_id = req.get('user_msg_id')
             bot_fwd_msg_id = req.get('bot_fwd_msg_id')
+            bot_reply_msg_id = req.get('bot_reply_msg_id')
 
             cursor.execute("SELECT file_id FROM files WHERE hash = %s", (file_hash,))
             file_row = cursor.fetchone()
@@ -340,10 +378,12 @@ async def serve_file(callback: CallbackQuery):
         sent_file = await bot.send_document(user_id, file_id, caption=caption)
         
         # Clean up previous messages
-        msgs_to_delete = [callback.message.message_id]
-        if user_msg_id: msgs_to_delete.append(user_msg_id)
-        if bot_fwd_msg_id: msgs_to_delete.append(bot_fwd_msg_id)
-        
+        msgs_to_delete = [callback.message.message_id] # The message with the inline buttons
+        # if user_msg_id: msgs_to_delete.append(user_msg_id) # User's /start message - generally not deleted
+        if bot_fwd_msg_id: msgs_to_delete.append(bot_fwd_msg_id) # The forwarded ad
+        if bot_reply_msg_id: msgs_to_delete.append(bot_reply_msg_id) # The bot's reply with buttons (if different from callback.message.message_id)
+
+        # Delete messages
         for m_id in msgs_to_delete:
             try:
                 await bot.delete_message(user_id, m_id)
