@@ -147,8 +147,6 @@ def clean_filename_for_display(filename: str) -> str:
     name = re.sub(r'\s+', ' ', name).strip() # Remove extra spaces
     return name if name else filename # Return original if cleaning results in empty string
 
-import re # Added for clean_filename_for_display
-
 @dp.message(Command("setchannel"), F.from_user.id == ADMIN_ID)
 async def set_channel_command(message: Message):
     """Admin command to register a channel with a short name."""
@@ -178,6 +176,123 @@ async def set_channel_command(message: Message):
         await message.answer("❌ Channel not found. Make sure the bot is an admin in the channel and the ID/username is correct.")
     except Exception as e:
         await message.answer(f"❌ An error occurred: {e}")
+
+@dp.message(Command("listchannels"), F.from_user.id == ADMIN_ID)
+async def list_channels_command(message: Message):
+    """Admin command to list all registered channels."""
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT short_name, channel_id, full_name FROM channels ORDER BY short_name")
+            channels = cursor.fetchall()
+
+            if not channels:
+                return await message.answer("ℹ️ No channels registered. Use `/setchannel` to add one.")
+            
+            lines = ["📚 <b>Registered Channels:</b>\n"]
+            for ch in channels:
+                lines.append(f"▪️ <b>{ch['short_name']}</b>: {ch['full_name']} (<code>{ch['channel_id']}</code>)")
+            
+            await message.answer("\n".join(lines), parse_mode=ParseMode.HTML)
+
+@dp.message(Command("deletechannel"), F.from_user.id == ADMIN_ID)
+async def delete_channel_command(message: Message):
+    """Admin command to delete a registered channel."""
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("Usage: `/deletechannel <short_name>`")
+    
+    short_name = args[1].upper()
+    
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM channels WHERE short_name = %s RETURNING full_name", (short_name,))
+            deleted_channel = cursor.fetchone()
+            conn.commit()
+            
+            if deleted_channel:
+                await message.answer(f"✅ Channel '{deleted_channel[0]}' (short name: '{short_name}') has been deleted.")
+            else:
+                await message.answer(f"❌ Channel with short name '{short_name}' not found.")
+
+@dp.message(Command("listads"), F.from_user.id == ADMIN_ID)
+async def list_ads_command(message: Message):
+    """Admin command to list all active ads."""
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # Clean up ads older than 24 hours (86400 seconds) from DB first
+            cursor.execute("DELETE FROM ads WHERE %s - timestamp > 86400", (time.time(),))
+            conn.commit()
+
+            cursor.execute("SELECT channel_id, message_id, url, timestamp FROM ads ORDER BY timestamp DESC")
+            ads = cursor.fetchall()
+
+            if not ads:
+                return await message.answer("ℹ️ No active ads found in the database.")
+            
+            lines = ["📢 <b>Active Ads (last 24h):</b>\n"]
+            for ad in ads:
+                age_seconds = time.time() - ad['timestamp']
+                age_hours = int(age_seconds / 3600)
+                lines.append(f"▪️ ID: <code>{ad['message_id']}</code> | Channel: <code>{ad['channel_id']}</code> | Age: {age_hours}h | URL: {ad['url']}")
+            
+            await message.answer("\n".join(lines), parse_mode=ParseMode.HTML)
+
+@dp.message(Command("deletead"), F.from_user.id == ADMIN_ID)
+async def delete_ad_command(message: Message):
+    """Admin command to delete a specific ad by message ID."""
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].isdigit():
+        return await message.answer("Usage: `/deletead <message_id>`")
+    
+    ad_message_id = int(args[1])
+    
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM ads WHERE message_id = %s RETURNING message_id", (ad_message_id,))
+            deleted_ad = cursor.fetchone()
+            conn.commit()
+            
+            if deleted_ad:
+                await message.answer(f"✅ Ad with message ID <code>{deleted_ad[0]}</code> has been deleted.")
+            else:
+                await message.answer(f"❌ Ad with message ID <code>{ad_message_id}</code> not found.")
+
+@dp.message(Command("listfiles"), F.from_user.id == ADMIN_ID)
+async def list_files_command(message: Message):
+    """Admin command to list all uploaded subtitle files."""
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT hash, file_id FROM files ORDER BY hash")
+            files = cursor.fetchall()
+
+            if not files:
+                return await message.answer("ℹ️ No subtitle files uploaded yet.")
+            
+            lines = ["📂 <b>Uploaded Subtitle Files:</b>\n"]
+            for f in files:
+                lines.append(f"▪️ Hash: <code>{f['hash']}</code> | File ID: <code>{f['file_id']}</code>")
+            
+            await message.answer("\n".join(lines), parse_mode=ParseMode.HTML)
+
+@dp.message(Command("deletefile"), F.from_user.id == ADMIN_ID)
+async def delete_file_command(message: Message):
+    """Admin command to delete a specific subtitle file by hash."""
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("Usage: `/deletefile <file_hash>`")
+    
+    file_hash = args[1]
+    
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM files WHERE hash = %s RETURNING hash", (file_hash,))
+            deleted_file = cursor.fetchone()
+            conn.commit()
+            
+            if deleted_file:
+                await message.answer(f"✅ Subtitle file with hash <code>{deleted_file[0]}</code> has been deleted.")
+            else:
+                await message.answer(f"❌ Subtitle file with hash <code>{file_hash}</code> not found.")
 
 @dp.callback_query(F.data.startswith("post_to_channel_"))
 async def post_to_channel_callback(callback: CallbackQuery):
@@ -228,6 +343,13 @@ async def post_to_channel_callback(callback: CallbackQuery):
                 await callback.message.answer(f"❌ An unexpected error occurred while posting: {e}", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("stats"), F.from_user.id == ADMIN_ID)
+async def view_stats(message: Message):
+    """Admin command to view user request statistics."""
+    # This function is already defined below, so this is a placeholder to avoid duplicate definition.
+    # The actual implementation is in the next block.
+    pass
+
+@dp.message(Command("stats"), F.from_user.id == ADMIN_ID) # This is the actual implementation
 async def view_stats(message: Message):
     """Admin command to view user request statistics."""
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
@@ -560,6 +682,13 @@ async def ping_handler(message: Message):
     await message.answer("🏓 Pong! The bot is online and actively receiving messages.")
 
 @dp.message()
+async def help_command(message: Message):
+    """Provides help information to the user."""
+    await message.answer("👋 Welcome! I'm a bot that helps you download subtitle files.\n\n"
+                         "To get a subtitle, you need a special link, usually found in channels where I post. Click that link to start the process!\n\n"
+                         "I'll ask you to click an ad to verify, then I'll send you the file. Easy!")
+
+@dp.message() # This is the actual implementation
 async def catch_all(message: Message):
     """Catches all other messages to let you know the bot is alive but confused."""
     await message.answer(f"🤖 I am alive! But I only understand Subtitle Files.\n\nPlease make sure you are sending your subtitle as an attached <b>Document/File</b>.\nYour ID: <code>{message.from_user.id}</code>")
