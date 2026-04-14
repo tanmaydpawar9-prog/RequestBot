@@ -4,7 +4,8 @@ import uuid
 import asyncio
 import logging
 import random
-import sqlite3
+import psycopg2
+import psycopg2.extras
 from dotenv import load_dotenv
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -28,20 +29,21 @@ PORT = int(os.getenv("PORT", 8080))
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# --- SQLite Database Setup ---
-conn = sqlite3.connect('database.db', check_same_thread=False)
-conn.row_factory = sqlite3.Row
-cursor = conn.cursor()
+# --- PostgreSQL Database Setup ---
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-cursor.execute('''CREATE TABLE IF NOT EXISTS files (hash TEXT PRIMARY KEY, file_id TEXT)''')
-cursor.execute('''CREATE TABLE IF NOT EXISTS ads (channel_id INTEGER, message_id INTEGER, url TEXT, timestamp REAL)''')
-cursor.execute('''CREATE TABLE IF NOT EXISTS requests (request_key TEXT PRIMARY KEY, verified INTEGER, timestamp REAL, target_url TEXT)''')
-
-# Statistics Tables
-cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, name TEXT, total_requests INTEGER DEFAULT 0, successful_receives INTEGER DEFAULT 0)''')
-cursor.execute('''CREATE TABLE IF NOT EXISTS user_file_requests (user_id INTEGER, file_hash TEXT, count INTEGER DEFAULT 0, PRIMARY KEY(user_id, file_hash))''')
-
-conn.commit()
+if DATABASE_URL:
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor() as cursor:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS files (hash TEXT PRIMARY KEY, file_id TEXT)''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS ads (channel_id BIGINT, message_id BIGINT, url TEXT, timestamp REAL)''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS requests (request_key TEXT PRIMARY KEY, verified INTEGER, timestamp REAL, target_url TEXT)''')
+            
+            # Statistics Tables
+            cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, name TEXT, total_requests INTEGER DEFAULT 0, successful_receives INTEGER DEFAULT 0)''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS user_file_requests (user_id BIGINT, file_hash TEXT, count INTEGER DEFAULT 0, PRIMARY KEY(user_id, file_hash))''')
+else:
+    logging.error("DATABASE_URL is not set! Data will not be saved.")
 
 # --- Telegram Bot Handlers ---
 
@@ -68,30 +70,32 @@ def extract_ad_url(message: Message):
 @dp.message(Command("stats") & (F.from_user.id == ADMIN_ID))
 async def view_stats(message: Message):
     """Admin command to view user request statistics."""
-    cursor.execute("SELECT SUM(total_requests), SUM(successful_receives) FROM users")
-    totals = cursor.fetchone()
-    tot_req = totals[0] or 0
-    tot_succ = totals[1] or 0
-    
-    if tot_req == 0:
-        return await message.answer("📊 No file requests have been made yet.")
-        
-    lines = [
-        "📊 <b>Global Statistics:</b>",
-        f"Total Links Clicked: {tot_req}",
-        f"Total Files Received: {tot_succ}",
-        "\n👥 <b>User Breakdown:</b>\n"
-    ]
-    
-    cursor.execute("SELECT user_id, name, total_requests, successful_receives FROM users ORDER BY successful_receives DESC")
-    for row in cursor.fetchall():
-        uid = row['user_id']
-        lines.append(f"👤 <b>{row['name']}</b> (<code>{uid}</code>)\nClicks: {row['total_requests']} | Received: {row['successful_receives']}")
-        
-        cursor.execute("SELECT file_hash, count FROM user_file_requests WHERE user_id = ?", (uid,))
-        for f_row in cursor.fetchall():
-            lines.append(f"  └ File <code>{f_row['file_hash']}</code>: {f_row['count']} times")
-        lines.append("")
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT SUM(total_requests), SUM(successful_receives) FROM users")
+            totals = cursor.fetchone()
+            tot_req = totals[0] or 0
+            tot_succ = totals[1] or 0
+            
+            if tot_req == 0:
+                return await message.answer("📊 No file requests have been made yet.")
+                
+            lines = [
+                "📊 <b>Global Statistics:</b>",
+                f"Total Links Clicked: {tot_req}",
+                f"Total Files Received: {tot_succ}",
+                "\n👥 <b>User Breakdown:</b>\n"
+            ]
+            
+            cursor.execute("SELECT user_id, name, total_requests, successful_receives FROM users ORDER BY successful_receives DESC")
+            for row in cursor.fetchall():
+                uid = row['user_id']
+                lines.append(f"👤 <b>{row['name']}</b> (<code>{uid}</code>)\nClicks: {row['total_requests']} | Received: {row['successful_receives']}")
+                
+                cursor.execute("SELECT file_hash, count FROM user_file_requests WHERE user_id = %s", (uid,))
+                for f_row in cursor.fetchall():
+                    lines.append(f"  └ File <code>{f_row['file_hash']}</code>: {f_row['count']} times")
+                lines.append("")
         
     text = "\n".join(lines)
     if len(text) > 4000:
@@ -104,8 +108,9 @@ async def handle_admin_upload(message: Message):
     file_id = message.document.file_id
     file_hash = uuid.uuid4().hex[:8]
     
-    cursor.execute("INSERT INTO files (hash, file_id) VALUES (?, ?)", (file_hash, file_id))
-    conn.commit()
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("INSERT INTO files (hash, file_id) VALUES (%s, %s)", (file_hash, file_id))
     
     bot_info = await bot.me()
     deep_link = f"https://t.me/{bot_info.username}?start={file_hash}"
@@ -120,12 +125,13 @@ async def track_channel_ads(message: Message):
     """Monitors any channel the bot is in to automatically log ads."""
     ad_url = extract_ad_url(message)
     if ad_url:
-        cursor.execute("SELECT 1 FROM ads WHERE message_id = ?", (message.message_id,))
-        if not cursor.fetchone():
-            cursor.execute("INSERT INTO ads (channel_id, message_id, url, timestamp) VALUES (?, ?, ?, ?)", 
-                           (message.chat.id, message.message_id, ad_url, time.time()))
-            conn.commit()
-            logging.info(f"New ad registered automatically: {ad_url}")
+        with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM ads WHERE message_id = %s", (message.message_id,))
+                if not cursor.fetchone():
+                    cursor.execute("INSERT INTO ads (channel_id, message_id, url, timestamp) VALUES (%s, %s, %s, %s)", 
+                                   (message.chat.id, message.message_id, ad_url, time.time()))
+                    logging.info(f"New ad registered automatically: {ad_url}")
 
 @dp.message((F.from_user.id == ADMIN_ID) & F.forward_from_chat & (F.forward_from_chat.type == 'channel'))
 async def register_previous_ad(message: Message):
@@ -135,13 +141,14 @@ async def register_previous_ad(message: Message):
         orig_msg_id = message.forward_from_message_id
         channel_id = message.forward_from_chat.id
         
-        cursor.execute("SELECT 1 FROM ads WHERE message_id = ?", (orig_msg_id,))
-        if not cursor.fetchone():
-            cursor.execute("INSERT INTO ads (channel_id, message_id, url, timestamp) VALUES (?, ?, ?, ?)", (channel_id, orig_msg_id, ad_url, time.time()))
-            conn.commit()
-            await message.reply(f"✅ Previous ad (ID: {orig_msg_id}) successfully registered into rotation!")
-        else:
-            await message.reply("⚠️ This ad is already in the database.")
+        with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM ads WHERE message_id = %s", (orig_msg_id,))
+                if not cursor.fetchone():
+                    cursor.execute("INSERT INTO ads (channel_id, message_id, url, timestamp) VALUES (%s, %s, %s, %s)", (channel_id, orig_msg_id, ad_url, time.time()))
+                    await message.reply(f"✅ Previous ad (ID: {orig_msg_id}) successfully registered into rotation!")
+                else:
+                    await message.reply("⚠️ This ad is already in the database.")
     else:
         await message.reply("❌ No URL found. Is this definitely an ad?")
 
@@ -150,19 +157,7 @@ async def handle_start(message: Message, command: CommandStart):
     """Handles the user clicking the deep link."""
     file_hash = command.args
     
-    cursor.execute("SELECT file_id FROM files WHERE hash = ?", (file_hash,))
-    if not file_hash or not cursor.fetchone():
-        return await message.answer("Welcome! Please use a valid file request link.")
-        
     user_id = message.from_user.id
-    
-    # Track Total Request Clicks for this user
-    cursor.execute("""
-        INSERT INTO users (user_id, name, total_requests, successful_receives) 
-        VALUES (?, ?, 1, 0) 
-        ON CONFLICT(user_id) DO UPDATE SET total_requests = total_requests + 1, name = excluded.name
-    """, (user_id, message.from_user.full_name))
-    conn.commit()
     
     request_key = f"{user_id}_{file_hash}"
     
@@ -170,20 +165,30 @@ async def handle_start(message: Message, command: CommandStart):
     ad_msg_id = None
     ad_channel_id = None
     
-    # Clean up ads older than 24 hours (86400 seconds) from DB
-    cursor.execute("DELETE FROM ads WHERE ? - timestamp > 86400", (time.time(),))
-    conn.commit()
-    
-    cursor.execute("SELECT channel_id, message_id, url FROM ads")
-    ads_db = cursor.fetchall()
-    if ads_db:
-        selected_ad = random.choice(ads_db)
-        ad_url, ad_msg_id, ad_channel_id = selected_ad['url'], selected_ad['message_id'], selected_ad['channel_id']
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT file_id FROM files WHERE hash = %s", (file_hash,))
+            if not file_hash or not cursor.fetchone():
+                return await message.answer("Welcome! Please use a valid file request link.")
+                
+            cursor.execute("""
+                INSERT INTO users (user_id, name, total_requests, successful_receives) 
+                VALUES (%s, %s, 1, 0) 
+                ON CONFLICT(user_id) DO UPDATE SET total_requests = users.total_requests + 1, name = EXCLUDED.name
+            """, (user_id, message.from_user.full_name))
+            
+            cursor.execute("DELETE FROM ads WHERE %s - timestamp > 86400", (time.time(),))
+            
+            cursor.execute("SELECT channel_id, message_id, url FROM ads")
+            ads_db = cursor.fetchall()
+            if ads_db:
+                selected_ad = random.choice(ads_db)
+                ad_url, ad_msg_id, ad_channel_id = selected_ad['url'], selected_ad['message_id'], selected_ad['channel_id']
 
-    # Save verification session to DB
-    cursor.execute("INSERT OR REPLACE INTO requests (request_key, verified, timestamp, target_url) VALUES (?, 0, ?, ?)", 
-                   (request_key, time.time(), ad_url))
-    conn.commit()
+            cursor.execute("""
+                INSERT INTO requests (request_key, verified, timestamp, target_url) VALUES (%s, 0, %s, %s)
+                ON CONFLICT(request_key) DO UPDATE SET verified = 0, timestamp = EXCLUDED.timestamp, target_url = EXCLUDED.target_url
+            """, (request_key, time.time(), ad_url))
     
     track_url = f"{WEB_APP_DOMAIN}/track?u={user_id}&h={file_hash}"
     
@@ -218,40 +223,41 @@ async def serve_file(callback: CallbackQuery):
     file_hash = callback.data.split("_")[1]
     request_key = f"{user_id}_{file_hash}"
     
-    cursor.execute("SELECT verified, timestamp FROM requests WHERE request_key = ?", (request_key,))
-    req = cursor.fetchone()
-    
-    if not req:
-        return await callback.answer("Invalid or expired session. Please click the original link again.", show_alert=True)
-        
-    if time.time() - req['timestamp'] > 300:
-        cursor.execute("DELETE FROM requests WHERE request_key = ?", (request_key,))
-        conn.commit()
-        return await callback.answer("Request expired (5 minutes limit). Please generate a new one.", show_alert=True)
-        
-    if not req['verified']:
-        return await callback.answer("❌ You must click the 'Click Ad to Verify' button first!", show_alert=True)
-        
-    cursor.execute("SELECT file_id FROM files WHERE hash = ?", (file_hash,))
-    file_row = cursor.fetchone()
-    
-    if file_row:
-        # Update Success Statistics
-        cursor.execute("UPDATE users SET successful_receives = successful_receives + 1 WHERE user_id = ?", (user_id,))
-        cursor.execute("""
-            INSERT INTO user_file_requests (user_id, file_hash, count) VALUES (?, ?, 1)
-            ON CONFLICT(user_id, file_hash) DO UPDATE SET count = count + 1
-        """, (user_id, file_hash))
-        conn.commit()
-
-        # Send File
-        await bot.send_document(user_id, file_row[0], caption="✅ Here is your requested subtitle file!")
+    file_id = None
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT verified, timestamp FROM requests WHERE request_key = %s", (request_key,))
+            req = cursor.fetchone()
+            
+            if not req:
+                return await callback.answer("Invalid or expired session. Please click the original link again.", show_alert=True)
+                
+            if time.time() - req['timestamp'] > 300:
+                cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,))
+                return await callback.answer("Request expired (5 minutes limit). Please generate a new one.", show_alert=True)
+                
+            if not req['verified']:
+                return await callback.answer("❌ You must click the 'Click Ad to Verify' button first!", show_alert=True)
+                
+            cursor.execute("SELECT file_id FROM files WHERE hash = %s", (file_hash,))
+            file_row = cursor.fetchone()
+            
+            if file_row:
+                cursor.execute("UPDATE users SET successful_receives = successful_receives + 1 WHERE user_id = %s", (user_id,))
+                cursor.execute("""
+                    INSERT INTO user_file_requests (user_id, file_hash, count) VALUES (%s, %s, 1)
+                    ON CONFLICT(user_id, file_hash) DO UPDATE SET count = user_file_requests.count + 1
+                """, (user_id, file_hash))
+                file_id = file_row[0]
+                
+            cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,))
+            
+    if file_id:
+        await bot.send_document(user_id, file_id, caption="✅ Here is your requested subtitle file!")
     else:
         await callback.answer("File no longer available.", show_alert=True)
         
     await callback.answer()
-    cursor.execute("DELETE FROM requests WHERE request_key = ?", (request_key,))
-    conn.commit()
 
 # --- Web Server for Tracking Clicks ---
 async def track_click(request: web.Request):
@@ -263,13 +269,14 @@ async def track_click(request: web.Request):
     
     if user_id and file_hash:
         request_key = f"{user_id}_{file_hash}"
-        cursor.execute("SELECT target_url FROM requests WHERE request_key = ?", (request_key,))
-        req = cursor.fetchone()
-        if req:
-            cursor.execute("UPDATE requests SET verified = 1 WHERE request_key = ?", (request_key,))
-            conn.commit()
-            target_url = req['target_url']
-            logging.info(f"User {user_id} verified for file {file_hash}")
+        with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+                cursor.execute("SELECT target_url FROM requests WHERE request_key = %s", (request_key,))
+                req = cursor.fetchone()
+                if req:
+                    cursor.execute("UPDATE requests SET verified = 1 WHERE request_key = %s", (request_key,))
+                    target_url = req['target_url']
+                    logging.info(f"User {user_id} verified for file {file_hash}")
             
     raise web.HTTPFound(target_url)
 
