@@ -103,10 +103,6 @@ async def delete_message_later(chat_id: int, message_id: int, delay: int):
                 cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,)) # Delete the request from DB
                 conn.commit()
 
-# --- Temporary Admin State (for multi-step commands) ---
-# Stores {admin_id: {'file_hash': '...', 'file_name': '...'}}
-admin_temp_state = {}
-
 # --- Utility Functions ---
 
 # --- Telegram Bot Handlers ---
@@ -173,10 +169,6 @@ def extract_channel_short_name_from_filename(filename: str) -> Optional[str]:
             
     return None
 
-async def cleanup_unclicked_request(request_key: str, chat_id: int):
-    """Deletes request messages if user hasn't clicked anything after 2 minutes."""
-    await asyncio.sleep(120) # Wait for 2 minutes
-    await _perform_cleanup_unclicked_request(request_key, chat_id)
 
 @dp.message(Command("setchannel"), F.from_user.id == ADMIN_ID)
 async def set_channel_command(message: Message):
@@ -623,14 +615,20 @@ async def track_click(request: web.Request):
             
     raise web.HTTPFound(target_url)
 
+async def health_check(request: web.Request):
+    """Simple health check endpoint for cron jobs to keep the server alive."""
+    logging.info("Health check / request received.")
+    return web.Response(text="Bot is alive!", status=200)
+
 # --- Startup Logic ---
 async def main():
     app = web.Application()
     logging.info("Web application initialized.")
     app.router.add_get('/track', track_click)
+    app.router.add_get('/', health_check) # Add the new health check route BEFORE runner.setup()
     runner = web.AppRunner(app)
     await runner.setup()
-    
+
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     logging.info(f"Attempting to start web server on port {PORT}...")
     await site.start()
