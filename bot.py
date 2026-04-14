@@ -237,7 +237,15 @@ async def post_to_channel_callback(callback: CallbackQuery):
             bot_info = await bot.me()
             deep_link = f"https://t.me/{bot_info.username}?start={file_hash}"
             
-            display_name = clean_filename_for_display(original_filename)
+            # Extract episode information from the original filename
+            episode_match = re.search(r'\b(EP\d+|S\d+E\d+)\b', original_filename, re.IGNORECASE)
+            episode_info = episode_match.group(0).upper() if episode_match else "" # e.g., "EP136"
+
+            # Construct the desired message text for the channel post
+            if episode_info:
+                post_text = f"<b>{channel_full_name} {episode_info} Subtitle</b>"
+            else:
+                post_text = f"<b>{channel_full_name} Subtitle</b>"
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="DOWNLOAD SUBTITLE", url=deep_link)]
@@ -245,8 +253,8 @@ async def post_to_channel_callback(callback: CallbackQuery):
             
             try:
                 await bot.send_message(
-                    chat_id=target_channel_id,
-                    text=f"🎬 <b>{display_name}</b>\n\nDownload the subtitle file below:",
+                    chat_id=target_channel_id, # Post to the target channel
+                    text=post_text, # Use the newly constructed text
                     reply_markup=keyboard,
                     parse_mode=ParseMode.HTML
                 )
