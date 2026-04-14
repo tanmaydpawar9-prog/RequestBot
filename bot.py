@@ -41,6 +41,7 @@ if DATABASE_URL:
             cursor.execute('''CREATE TABLE IF NOT EXISTS ads (channel_id BIGINT, message_id BIGINT, url TEXT, timestamp REAL)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS requests (request_key TEXT PRIMARY KEY, verified INTEGER, timestamp REAL, target_url TEXT)''')
             
+            cursor.execute('''CREATE TABLE IF NOT EXISTS channels (short_name TEXT PRIMARY KEY, channel_id BIGINT UNIQUE, full_name TEXT)''')
             # Statistics Tables
             cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, name TEXT, total_requests INTEGER DEFAULT 0, successful_receives INTEGER DEFAULT 0)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS user_file_requests (user_id BIGINT, file_hash TEXT, count INTEGER DEFAULT 0, PRIMARY KEY(user_id, file_hash))''')
@@ -53,6 +54,9 @@ if DATABASE_URL:
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='requests' AND column_name='bot_reply_msg_id'")
             if not cursor.fetchone():
                 cursor.execute("ALTER TABLE requests ADD COLUMN bot_reply_msg_id BIGINT")
+            
+            # Commit any schema changes
+            conn.commit()
 else:
     logging.error("DATABASE_URL is not set! Data will not be saved.")
 
@@ -104,6 +108,10 @@ async def cleanup_unclicked_request(request_key: str, chat_id: int):
                 
                 cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,))
 
+# --- Temporary Admin State (for multi-step commands) ---
+# Stores {admin_id: {'file_hash': '...', 'file_name': '...'}}
+admin_temp_state = {}
+
 # --- Telegram Bot Handlers ---
 
 def extract_ad_url(message: Message):
@@ -125,6 +133,99 @@ def extract_ad_url(message: Message):
             elif entity.type == 'url':
                 return text[entity.offset:entity.offset+entity.length]
     return None
+
+def clean_filename_for_display(filename: str) -> str:
+    """Extracts a clean title from a subtitle filename."""
+    # Remove common subtitle file extensions and quality tags
+    name = os.path.splitext(filename)[0]
+    name = name.replace('.', ' ').replace('_', ' ')
+    name = re.sub(r'\[.*?\]', '', name) # Remove [tags]
+    name = re.sub(r'\(.*?\)', '', name) # Remove (tags)
+    name = re.sub(r'\b(S\d{2}E\d{2}|s\d{2}e\d{2})\b', '', name, flags=re.IGNORECASE) # Remove S01E01
+    name = re.sub(r'\b(HDTV|WEB-DL|WEBRip|BluRay|x264|x265|AAC|MP4|720p|1080p|480p|HDRip|XviD|AC3|E-AC3)\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\b(Dual Audio|Hindi|English|Multi|Dubbed|Subbed)\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s+', ' ', name).strip() # Remove extra spaces
+    return name if name else filename # Return original if cleaning results in empty string
+
+import re # Added for clean_filename_for_display
+
+@dp.message(Command("setchannel"), F.from_user.id == ADMIN_ID)
+async def set_channel_command(message: Message):
+    """Admin command to register a channel with a short name."""
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        return await message.answer("Usage: `/setchannel <short_name> <channel_id_or_username>`\n\nExample: `/setchannel RI @RenegadeImmoral` or `/setchannel SS -1001234567890`", parse_mode=ParseMode.MARKDOWN)
+
+    short_name = args[1].upper()
+    channel_identifier = args[2]
+    
+    try:
+        # Try to get chat info to resolve ID and full name
+        chat = await bot.get_chat(channel_identifier)
+        channel_id = chat.id
+        full_name = chat.title
+
+        if chat.type != 'channel':
+            return await message.answer("❌ The provided ID/username does not belong to a channel.")
+
+        with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("INSERT INTO channels (short_name, channel_id, full_name) VALUES (%s, %s, %s) ON CONFLICT (short_name) DO UPDATE SET channel_id = EXCLUDED.channel_id, full_name = EXCLUDED.full_name",
+                               (short_name, channel_id, full_name))
+                conn.commit()
+        await message.answer(f"✅ Channel '{full_name}' registered as '{short_name}' (ID: <code>{channel_id}</code>).", parse_mode=ParseMode.HTML)
+    except TelegramNotFound:
+        await message.answer("❌ Channel not found. Make sure the bot is an admin in the channel and the ID/username is correct.")
+    except Exception as e:
+        await message.answer(f"❌ An error occurred: {e}")
+
+@dp.callback_query(F.data.startswith("post_to_channel_"))
+async def post_to_channel_callback(callback: CallbackQuery):
+    """Handles admin's selection of a channel to post the subtitle to."""
+    admin_id = callback.from_user.id
+    short_name = callback.data.split("_")[3] # post_to_channel_SHORTNAME
+
+    if admin_id not in admin_temp_state:
+        return await callback.answer("Session expired. Please re-upload the file.", show_alert=True)
+
+    file_info = admin_temp_state.pop(admin_id) # Get info and clear state
+    file_hash = file_info['file_hash']
+    original_filename = file_info['file_name']
+    
+    await callback.answer("Posting to channel...", show_alert=False)
+
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT channel_id, full_name FROM channels WHERE short_name = %s", (short_name,))
+            channel_data = cursor.fetchone()
+
+            if not channel_data:
+                return await callback.message.answer(f"❌ Channel '{short_name}' not found in database. Please register it first.")
+
+            target_channel_id = channel_data['channel_id']
+            channel_full_name = channel_data['full_name']
+            
+            bot_info = await bot.me()
+            deep_link = f"https://t.me/{bot_info.username}?start={file_hash}"
+            
+            display_name = clean_filename_for_display(original_filename)
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬇️ Download Subtitle", url=deep_link)]
+            ])
+            
+            try:
+                await bot.send_message(
+                    chat_id=target_channel_id,
+                    text=f"🎬 <b>{display_name}</b>\n\nDownload the subtitle file below:",
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML
+                )
+                await callback.message.answer(f"✅ Subtitle for '<b>{display_name}</b>' posted to channel '<b>{channel_full_name}</b>'!", parse_mode=ParseMode.HTML)
+            except TelegramBadRequest as e:
+                await callback.message.answer(f"❌ Failed to post to channel '<b>{channel_full_name}</b>'. Error: {e}\n\nMake sure the bot is an admin in the channel and has permission to post messages.", parse_mode=ParseMode.HTML)
+            except Exception as e:
+                await callback.message.answer(f"❌ An unexpected error occurred while posting: {e}", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("stats"), F.from_user.id == ADMIN_ID)
 async def view_stats(message: Message):
@@ -167,16 +268,39 @@ async def handle_admin_upload(message: Message):
     file_id = message.document.file_id
     file_hash = uuid.uuid4().hex[:8]
     
+    original_filename = message.document.file_name
+
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
             cursor.execute("INSERT INTO files (hash, file_id) VALUES (%s, %s)", (file_hash, file_id))
     
-    bot_info = await bot.me()
-    deep_link = f"https://t.me/{bot_info.username}?start={file_hash}"
+    # Store file info temporarily for channel selection
+    admin_temp_state[message.from_user.id] = {
+        'file_hash': file_hash,
+        'file_name': original_filename
+    }
+
+    # Get registered channels for inline keyboard
+    channels_keyboard_buttons = []
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT short_name, full_name FROM channels ORDER BY short_name")
+            for row in cursor.fetchall():
+                channels_keyboard_buttons.append(
+                    [InlineKeyboardButton(text=f"{row['short_name']} ({row['full_name']})", callback_data=f"post_to_channel_{row['short_name']}")]
+                )
     
+    if not channels_keyboard_buttons:
+        return await message.answer(
+            f"✅ File '<b>{original_filename}</b>' uploaded successfully.\n\n"
+            f"⚠️ No channels registered. Use `/setchannel <short_name> <channel_id_or_username>` to add one, then re-upload the file to post it."
+        )
+
     await message.answer(
-        f"✅ <b>File uploaded successfully!</b>\n\n"
-        f"Here is the request link to share:\n<code>{deep_link}</code>"
+        f"✅ File '<b>{original_filename}</b>' uploaded successfully!\n\n"
+        f"Now, select the channel where you want to post the 'Download Subtitle' button:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=channels_keyboard_buttons),
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(F.document)
