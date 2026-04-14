@@ -6,7 +6,6 @@ import logging
 import random
 import psycopg2
 import psycopg2.extras
-import traceback
 from dotenv import load_dotenv
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -16,6 +15,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+import traceback # Moved here to ensure it's available for global_error_handler
 from typing import Optional # Added for extract_channel_short_name_from_filename
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -626,11 +626,13 @@ async def track_click(request: web.Request):
 # --- Startup Logic ---
 async def main():
     app = web.Application()
+    logging.info("Web application initialized.")
     app.router.add_get('/track', track_click)
     runner = web.AppRunner(app)
     await runner.setup()
     
     site = web.TCPSite(runner, '0.0.0.0', PORT)
+    logging.info(f"Attempting to start web server on port {PORT}...")
     await site.start()
     logging.info(f"Web server running on port {PORT}")
     
@@ -638,6 +640,7 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     logging.info("Starting Telegram bot...")
     await dp.start_polling(bot)
+    logging.info("Telegram bot polling started.")
 
 if __name__ == "__main__":
     try:
