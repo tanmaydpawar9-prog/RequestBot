@@ -30,7 +30,7 @@ dp = Dispatcher()
 # --- In-Memory Database ---
 files_db = {}       # { hash: file_id }
 requests_db = {}    # { "user_id_file_hash": {"verified": bool, "timestamp": float, "target_url": str} }
-ads_db = []         # [{"channel_id": int, "message_id": int, "url": str}]
+ads_db = []         # [{"channel_id": int, "message_id": int, "url": str, "timestamp": float}]
 
 # --- Telegram Bot Handlers ---
 
@@ -76,7 +76,7 @@ async def track_channel_ads(message: Message):
     ad_url = extract_ad_url(message)
     if ad_url:
         if not any(ad["message_id"] == message.message_id for ad in ads_db):
-            ads_db.append({"channel_id": message.chat.id, "message_id": message.message_id, "url": ad_url})
+            ads_db.append({"channel_id": message.chat.id, "message_id": message.message_id, "url": ad_url, "timestamp": time.time()})
             logging.info(f"New ad registered automatically: {ad_url}")
 
 @dp.message((F.from_user.id == ADMIN_ID) & F.forward_from_chat & (F.forward_from_chat.type == 'channel'))
@@ -87,7 +87,7 @@ async def register_previous_ad(message: Message):
         orig_msg_id = message.forward_from_message_id
         channel_id = message.forward_from_chat.id
         if not any(ad["message_id"] == orig_msg_id for ad in ads_db):
-            ads_db.append({"channel_id": channel_id, "message_id": orig_msg_id, "url": ad_url})
+            ads_db.append({"channel_id": channel_id, "message_id": orig_msg_id, "url": ad_url, "timestamp": time.time()})
             await message.reply(f"✅ Previous ad (ID: {orig_msg_id}) successfully registered into rotation!")
         else:
             await message.reply("⚠️ This ad is already in the database.")
@@ -108,6 +108,11 @@ async def handle_start(message: Message, command: CommandStart):
     ad_url = "https://example.com"
     ad_msg_id = None
     ad_channel_id = None
+    
+    # Clean up ads older than 24 hours (86400 seconds) before selecting one
+    global ads_db
+    current_time = time.time()
+    ads_db = [ad for ad in ads_db if current_time - ad["timestamp"] < 86400]
     
     if ads_db:
         selected_ad = random.choice(ads_db)
