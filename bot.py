@@ -120,6 +120,16 @@ async def handle_admin_upload(message: Message):
         f"Here is the request link to share:\n<code>{deep_link}</code>"
     )
 
+@dp.message(F.document)
+async def handle_unauthorized_upload(message: Message):
+    """Catches document uploads from non-admins for debugging."""
+    await message.answer(
+        f"❌ <b>Unauthorized or ID Mismatch!</b>\n\n"
+        f"Your Telegram ID: <code>{message.from_user.id}</code>\n"
+        f"Bot's configured ADMIN_ID: <code>{ADMIN_ID}</code>\n\n"
+        f"If these numbers don't match, you must update the ADMIN_ID variable in your Render dashboard!"
+    )
+
 @dp.channel_post()
 async def track_channel_ads(message: Message):
     """Monitors any channel the bot is in to automatically log ads."""
