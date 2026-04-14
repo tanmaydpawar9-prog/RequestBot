@@ -286,6 +286,16 @@ async def serve_file(callback: CallbackQuery):
         
     await callback.answer()
 
+@dp.message(Command("ping"))
+async def ping_handler(message: Message):
+    """Simple command to test if the bot is alive."""
+    await message.answer("🏓 Pong! The bot is online and actively receiving messages.")
+
+@dp.message()
+async def catch_all(message: Message):
+    """Catches all other messages to let you know the bot is alive but confused."""
+    await message.answer(f"🤖 I am alive! But I only understand Subtitle Files.\n\nPlease make sure you are sending your subtitle as an attached <b>Document/File</b>.\nYour ID: <code>{message.from_user.id}</code>")
+
 # --- Web Server for Tracking Clicks ---
 async def track_click(request: web.Request):
     """Endpoint that verifies the user and redirects to the actual ad."""
