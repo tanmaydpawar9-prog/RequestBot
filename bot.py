@@ -84,7 +84,7 @@ def extract_ad_url(message: Message):
                 return text[entity.offset:entity.offset+entity.length]
     return None
 
-@dp.message(Command("stats") & (F.from_user.id == ADMIN_ID))
+@dp.message(Command("stats"), F.from_user.id == ADMIN_ID)
 async def view_stats(message: Message):
     """Admin command to view user request statistics."""
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
@@ -119,7 +119,7 @@ async def view_stats(message: Message):
         text = text[:4000] + "\n... (truncated)"
     await message.answer(text)
 
-@dp.message(F.document & (F.from_user.id == ADMIN_ID))
+@dp.message(F.document, F.from_user.id == ADMIN_ID)
 async def handle_admin_upload(message: Message):
     """Admin uploads a subtitle file to generate a link."""
     file_id = message.document.file_id
@@ -160,7 +160,7 @@ async def track_channel_ads(message: Message):
                                    (message.chat.id, message.message_id, ad_url, time.time()))
                     logging.info(f"New ad registered automatically: {ad_url}")
 
-@dp.message((F.from_user.id == ADMIN_ID) & F.forward_from_chat & (F.forward_from_chat.type == 'channel'))
+@dp.message(F.from_user.id == ADMIN_ID, F.forward_from_chat, F.forward_from_chat.type == 'channel')
 async def register_previous_ad(message: Message):
     """Admin forwards an old ad from the channel to register it."""
     ad_url = extract_ad_url(message)
