@@ -12,7 +12,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest, TelegramNotFound
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent, BufferedInputFile
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
@@ -269,31 +269,239 @@ async def view_stats(message: Message):
             totals = cursor.fetchone()
             tot_req = totals[0] or 0
             tot_succ = totals[1] or 0
-            
+
             if tot_req == 0:
                 return await message.answer("📊 No file requests have been made yet.")
-                
-            lines = [
-                "📊 <b>Global Statistics:</b>",
-                f"Total Links Clicked: {tot_req}",
-                f"Total Files Received: {tot_succ}",
-                "\n👥 <b>User Breakdown:</b>\n"
-            ]
-            
+
+            success_rate = (tot_succ / tot_req * 100) if tot_req > 0 else 0
+
             cursor.execute("SELECT user_id, name, total_requests, successful_receives FROM users ORDER BY successful_receives DESC")
-            for row in cursor.fetchall():
+            users = cursor.fetchall()
+            user_count = len(users)
+
+            lines = [
+                "╔═══════════════════════════╗",
+                "║   📊  <b>FRICTION  STATS</b>   ║",
+                "╚═══════════════════════════╝",
+                "",
+                "🌐  <b>GLOBAL OVERVIEW</b>",
+                "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈",
+                f"  🔗  Links Clicked   →  <b>{tot_req}</b>",
+                f"  📥  Files Received  →  <b>{tot_succ}</b>",
+                f"  📈  Success Rate    →  <b>{success_rate:.1f}%</b>",
+                "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈",
+                "",
+                f"👥  <b>USER BREAKDOWN</b>  ·  {user_count} user{'s' if user_count != 1 else ''}",
+                "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈",
+            ]
+
+            for i, row in enumerate(users, 1):
                 uid = row['user_id']
-                lines.append(f"👤 <b>{row['name']}</b> (<code>{uid}</code>)\nClicks: {row['total_requests']} | Received: {row['successful_receives']}")
-                
-                cursor.execute("SELECT file_hash, count FROM user_file_requests WHERE user_id = %s", (uid,))
-                for f_row in cursor.fetchall():
-                    lines.append(f"  └ File <code>{f_row['file_hash']}</code>: {f_row['count']} times")
+                name = row['name'] or "Unknown"
+                medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, "👤")
+
+                cursor.execute(
+                    "SELECT file_hash, count FROM user_file_requests WHERE user_id = %s ORDER BY count DESC",
+                    (uid,)
+                )
+                file_rows = cursor.fetchall()
+
                 lines.append("")
-        
+                lines.append(f"{medal}  <b>#{i} · {name}</b>")
+                lines.append(f"      🆔  <code>{uid}</code>")
+                lines.append(f"      🔗  Clicks: <b>{row['total_requests']}</b>   📥  Received: <b>{row['successful_receives']}</b>")
+
+                if file_rows:
+                    lines.append("      📁  <i>File history:</i>")
+                    for j, f_row in enumerate(file_rows):
+                        connector = "└" if j == len(file_rows) - 1 else "├"
+                        lines.append(f"         {connector} <code>{f_row['file_hash']}</code>  ×{f_row['count']}")
+
+            ts = time.strftime("%d %b %Y · %H:%M UTC", time.gmtime())
+            lines.append("")
+            lines.append("┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈")
+            lines.append(f"🕐  <i>{ts}</i>")
+
     text = "\n".join(lines)
     if len(text) > 4000:
-        text = text[:4000] + "\n... (truncated)"
+        text = text[:4000] + "\n<i>... (truncated)</i>"
     await message.answer(text)
+
+@dp.message(Command("getdata"), F.from_user.id == ADMIN_ID)
+async def get_data_pdf(message: Message):
+    """Admin command to export stats as a formatted PDF file."""
+    try:
+        import io
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable
+    except ImportError:
+        return await message.answer(
+            "❌ <b>reportlab</b> is not installed.\n"
+            "Add <code>reportlab</code> to your <code>requirements.txt</code> and redeploy."
+        )
+
+    status_msg = await message.answer("⏳ Generating PDF report…")
+
+    # --- Fetch all data ---
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT SUM(total_requests), SUM(successful_receives) FROM users")
+            totals = cursor.fetchone()
+            tot_req = totals[0] or 0
+            tot_succ = totals[1] or 0
+
+            if tot_req == 0:
+                await status_msg.delete()
+                return await message.answer("📊 No data yet to export.")
+
+            success_rate = (tot_succ / tot_req * 100) if tot_req > 0 else 0
+
+            cursor.execute(
+                "SELECT user_id, name, total_requests, successful_receives FROM users ORDER BY successful_receives DESC"
+            )
+            users = cursor.fetchall()
+
+            user_data = []
+            for row in users:
+                cursor.execute(
+                    "SELECT file_hash, count FROM user_file_requests WHERE user_id = %s ORDER BY count DESC",
+                    (row['user_id'],)
+                )
+                user_data.append({
+                    'user_id':   row['user_id'],
+                    'name':      row['name'] or 'Unknown',
+                    'clicks':    row['total_requests'],
+                    'received':  row['successful_receives'],
+                    'files':     cursor.fetchall()
+                })
+
+    # --- Build PDF in memory ---
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        topMargin=1.5*cm, bottomMargin=1.5*cm,
+        leftMargin=2*cm, rightMargin=2*cm,
+        title="TheFrictionRealm Stats"
+    )
+
+    # Colour palette
+    C_DARK    = colors.HexColor('#1a1a2e')
+    C_ACCENT  = colors.HexColor('#e94560')
+    C_MID     = colors.HexColor('#16213e')
+    C_ROW_A   = colors.HexColor('#f4f4f8')
+    C_ROW_B   = colors.white
+    C_BORDER  = colors.HexColor('#d0d0d8')
+    C_TEXT    = colors.HexColor('#222222')
+    C_SUBTLE  = colors.HexColor('#777777')
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('T', fontName='Helvetica-Bold', fontSize=20,
+                                 textColor=C_DARK, alignment=TA_CENTER, spaceAfter=4)
+    sub_style   = ParagraphStyle('S', fontName='Helvetica', fontSize=9,
+                                 textColor=C_SUBTLE, alignment=TA_CENTER, spaceAfter=18)
+    section_style = ParagraphStyle('SEC', fontName='Helvetica-Bold', fontSize=12,
+                                   textColor=C_DARK, spaceBefore=14, spaceAfter=6)
+
+    elements = []
+    ts_display = time.strftime('%d %B %Y  ·  %H:%M UTC', time.gmtime())
+
+    # Header
+    elements.append(Paragraph("TheFrictionRealm — Stats Report", title_style))
+    elements.append(Paragraph(f"Generated: {ts_display}", sub_style))
+    elements.append(HRFlowable(width="100%", thickness=2, color=C_ACCENT, spaceAfter=16))
+
+    # ── Global Overview table ──────────────────────────────────────────────
+    elements.append(Paragraph("Global Overview", section_style))
+    ov_data = [
+        ['Metric', 'Value'],
+        ['Total Links Clicked',  str(tot_req)],
+        ['Total Files Received', str(tot_succ)],
+        ['Overall Success Rate', f'{success_rate:.1f}%'],
+        ['Total Users',          str(len(user_data))],
+    ]
+    ov_style = [
+        ('BACKGROUND',   (0, 0), (-1, 0), C_DARK),
+        ('TEXTCOLOR',    (0, 0), (-1, 0), colors.white),
+        ('FONTNAME',     (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE',     (0, 0), (-1, 0), 10),
+        ('FONTNAME',     (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE',     (0, 1), (-1, -1), 10),
+        ('ALIGN',        (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN',       (0, 0), (-1, -1), 'MIDDLE'),
+        ('GRID',         (0, 0), (-1, -1), 0.5, C_BORDER),
+        ('TOPPADDING',   (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING',(0, 0), (-1, -1), 8),
+    ]
+    for i in range(1, len(ov_data)):
+        ov_style.append(('BACKGROUND', (0, i), (-1, i), C_ROW_A if i % 2 else C_ROW_B))
+
+    ov_table = Table(ov_data, colWidths=[10*cm, 6*cm])
+    ov_table.setStyle(TableStyle(ov_style))
+    elements.append(ov_table)
+    elements.append(Spacer(1, 0.6*cm))
+
+    # ── User Breakdown table ───────────────────────────────────────────────
+    elements.append(HRFlowable(width="100%", thickness=1, color=C_BORDER, spaceAfter=0))
+    elements.append(Paragraph("User Breakdown", section_style))
+
+    medals = {1: '🥇', 2: '🥈', 3: '🥉'}
+    ub_data = [['#', 'Name', 'User ID', 'Clicks', 'Received', 'Rate', 'Files Requested']]
+    for i, u in enumerate(user_data, 1):
+        rank = medals.get(i, str(i))
+        rate = f"{(u['received'] / u['clicks'] * 100):.0f}%" if u['clicks'] > 0 else '0%'
+        files_str = '\n'.join(
+            [f"{f['file_hash']}  ×{f['count']}" for f in u['files']]
+        ) or '—'
+        ub_data.append([rank, u['name'], str(u['user_id']),
+                        str(u['clicks']), str(u['received']), rate, files_str])
+
+    # Landscape A4 usable width ≈ 25.7 cm
+    col_w = [1.2*cm, 4.5*cm, 3.8*cm, 2*cm, 2.4*cm, 2*cm, 7*cm]
+    ub_style = [
+        ('BACKGROUND',   (0, 0), (-1, 0), C_ACCENT),
+        ('TEXTCOLOR',    (0, 0), (-1, 0), colors.white),
+        ('FONTNAME',     (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE',     (0, 0), (-1, 0), 9),
+        ('FONTNAME',     (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE',     (0, 1), (-1, -1), 8),
+        ('ALIGN',        (0, 0), (-1, -1), 'CENTER'),
+        ('ALIGN',        (1, 1), (1, -1), 'LEFT'),  # Name left-aligned
+        ('ALIGN',        (6, 1), (6, -1), 'LEFT'),  # Files left-aligned
+        ('VALIGN',       (0, 0), (-1, -1), 'MIDDLE'),
+        ('GRID',         (0, 0), (-1, -1), 0.5, C_BORDER),
+        ('TOPPADDING',   (0, 0), (-1, -1), 7),
+        ('BOTTOMPADDING',(0, 0), (-1, -1), 7),
+        ('LEFTPADDING',  (0, 0), (-1, -1), 5),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [C_ROW_A, C_ROW_B]),
+    ]
+    ub_table = Table(ub_data, colWidths=col_w, repeatRows=1)
+    ub_table.setStyle(TableStyle(ub_style))
+    elements.append(ub_table)
+
+    # Footer line
+    elements.append(Spacer(1, 0.5*cm))
+    elements.append(HRFlowable(width="100%", thickness=1, color=C_BORDER))
+    footer_style = ParagraphStyle('F', fontName='Helvetica', fontSize=8,
+                                  textColor=C_SUBTLE, alignment=TA_CENTER, spaceBefore=6)
+    elements.append(Paragraph("TheFrictionRealm Bot  ·  Admin Export", footer_style))
+
+    doc.build(elements)
+    buffer.seek(0)
+
+    ts_file = time.strftime('%Y%m%d_%H%M', time.gmtime())
+    await status_msg.delete()
+    await bot.send_document(
+        message.chat.id,
+        BufferedInputFile(buffer.read(), filename=f"frictionrealm_stats_{ts_file}.pdf"),
+        caption=f"📊 <b>TheFrictionRealm Stats</b>\n<i>{ts_display}</i>"
+    )
+
 
 @dp.message(F.document, F.from_user.id == ADMIN_ID)
 async def handle_admin_upload(message: Message):
