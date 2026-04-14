@@ -6,7 +6,7 @@ import logging
 import random
 import psycopg2
 import psycopg2.extras
-import traceback # Keep this for global error handling
+import traceback
 from dotenv import load_dotenv
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -16,6 +16,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from typing import Optional # Added for extract_channel_short_name_from_filename
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -41,19 +42,16 @@ if DATABASE_URL:
             cursor.execute('''CREATE TABLE IF NOT EXISTS ads (channel_id BIGINT, message_id BIGINT, url TEXT, timestamp REAL)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS requests (request_key TEXT PRIMARY KEY, verified INTEGER, timestamp REAL, target_url TEXT)''')
             
-            cursor.execute('''CREATE TABLE IF NOT EXISTS channels (short_name TEXT PRIMARY KEY, channel_id BIGINT UNIQUE, full_name TEXT)''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS channels (short_name TEXT PRIMARY KEY, channel_id BIGINT UNIQUE, full_name TEXT)''') # Ensure this is created
             # Statistics Tables
             cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, name TEXT, total_requests INTEGER DEFAULT 0, successful_receives INTEGER DEFAULT 0)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS user_file_requests (user_id BIGINT, file_hash TEXT, count INTEGER DEFAULT 0, PRIMARY KEY(user_id, file_hash))''')
             
-            # Add message tracking columns for cleanup if they don't exist yet
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='requests' AND column_name='user_msg_id'")
-            if not cursor.fetchone():
-                cursor.execute("ALTER TABLE requests ADD COLUMN user_msg_id BIGINT")
-                cursor.execute("ALTER TABLE requests ADD COLUMN bot_fwd_msg_id BIGINT")
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='requests' AND column_name='bot_reply_msg_id'")
-            if not cursor.fetchone():
-                cursor.execute("ALTER TABLE requests ADD COLUMN bot_reply_msg_id BIGINT")
+            # Add message tracking columns for cleanup if they don't exist yet (ensure these run after table creation)
+            for col in ['user_msg_id', 'bot_fwd_msg_id', 'bot_reply_msg_id']:
+                cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name='requests' AND column_name='{col}'")
+                if not cursor.fetchone():
+                    cursor.execute(f"ALTER TABLE requests ADD COLUMN {col} BIGINT")
             
             # Commit any schema changes
             conn.commit()
@@ -84,10 +82,6 @@ async def delete_message_later(chat_id: int, message_id: int, delay: int):
     except Exception as e:
         logging.error(f"Failed to delete delayed message: {e}")
 
-async def cleanup_unclicked_request(request_key: str, chat_id: int):
-    """Deletes request messages if user hasn't clicked anything after 1 minute."""
-    await asyncio.sleep(120) # Wait for 2 minutes
-
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute("SELECT verified, bot_fwd_msg_id, bot_reply_msg_id FROM requests WHERE request_key = %s", (request_key,))
@@ -106,11 +100,14 @@ async def cleanup_unclicked_request(request_key: str, chat_id: int):
                     except (TelegramNotFound, TelegramBadRequest): pass # Already deleted or invalid
                     except Exception as e: logging.error(f"Error deleting bot reply for {chat_id}: {e}")
                 
-                cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,))
+                cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,)) # Delete the request from DB
+                conn.commit()
 
 # --- Temporary Admin State (for multi-step commands) ---
 # Stores {admin_id: {'file_hash': '...', 'file_name': '...'}}
 admin_temp_state = {}
+
+# --- Utility Functions ---
 
 # --- Telegram Bot Handlers ---
 
@@ -147,9 +144,6 @@ def clean_filename_for_display(filename: str) -> str:
     name = re.sub(r'\s+', ' ', name).strip() # Remove extra spaces
     return name if name else filename # Return original if cleaning results in empty string
 
-import re # Added for clean_filename_for_display
-from typing import Optional # Added for extract_channel_short_name_from_filename
-
 def extract_channel_short_name_from_filename(filename: str) -> Optional[str]:
     """
     Extracts a short channel name (e.g., 'RI', 'SS') from a subtitle filename.
@@ -178,6 +172,11 @@ def extract_channel_short_name_from_filename(filename: str) -> Optional[str]:
             return match
             
     return None
+
+async def cleanup_unclicked_request(request_key: str, chat_id: int):
+    """Deletes request messages if user hasn't clicked anything after 2 minutes."""
+    await asyncio.sleep(120) # Wait for 2 minutes
+    await _perform_cleanup_unclicked_request(request_key, chat_id)
 
 @dp.message(Command("setchannel"), F.from_user.id == ADMIN_ID)
 async def set_channel_command(message: Message):
@@ -611,6 +610,7 @@ async def track_click(request: web.Request):
                 if req:
                     cursor.execute("UPDATE requests SET verified = 1 WHERE request_key = %s", (request_key,))
                     target_url = req['target_url']
+                    conn.commit() # Commit verification update
                     logging.info(f"User {user_id} verified for file {file_hash}")
             
     raise web.HTTPFound(target_url)
