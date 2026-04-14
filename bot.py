@@ -82,7 +82,7 @@ async def delete_message_later(chat_id: int, message_id: int, delay: int):
 
 async def cleanup_unclicked_request(request_key: str, chat_id: int):
     """Deletes request messages if user hasn't clicked anything after 1 minute."""
-    await asyncio.sleep(60) # Wait for 1 minute
+    await asyncio.sleep(120) # Wait for 2 minutes
 
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
@@ -299,12 +299,6 @@ async def handle_start(message: Message, command: CommandStart):
     ])
 
     if ad_msg_id and ad_channel_id:
-        await message.answer(
-            "<b>Verification Required</b>\n\n"
-            "Please click the 'Click Ad to Verify' button below.\n"
-            "After verifying, click 'Get Subtitle File' to receive your file.",
-            reply_markup=keyboard
-        )
         bot_reply_msg_id = (await message.answer(
             "<b>Verification Required</b>\n\n"
             "Please click the 'Click Ad to Verify' button below.\n"
@@ -318,7 +312,6 @@ async def handle_start(message: Message, command: CommandStart):
             f"<i>(No specific ad available at the moment.)</i>",
             reply_markup=keyboard
         )).message_id
-
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
