@@ -11,5 +11,7 @@ services:
         sync: false
       - key: WEB_APP_DOMAIN
         sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: PYTHON_VERSION
         value: 3.11.0
