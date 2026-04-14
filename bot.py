@@ -291,6 +291,8 @@ async def main():
     await site.start()
     logging.info(f"Web server running on port {PORT}")
     
+    # Delete any existing webhook before starting polling
+    await bot.delete_webhook(drop_pending_updates=True)
     logging.info("Starting Telegram bot...")
     await dp.start_polling(bot)
 
