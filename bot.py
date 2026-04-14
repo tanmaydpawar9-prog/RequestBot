@@ -6,7 +6,7 @@ import logging
 import random
 import psycopg2
 import psycopg2.extras
-import traceback
+import traceback # Keep this for global error handling
 from dotenv import load_dotenv
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -54,6 +54,9 @@ if DATABASE_URL:
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='requests' AND column_name='bot_reply_msg_id'")
             if not cursor.fetchone():
                 cursor.execute("ALTER TABLE requests ADD COLUMN bot_reply_msg_id BIGINT")
+            
+            # Commit any schema changes
+            conn.commit()
 else:
     logging.error("DATABASE_URL is not set! Data will not be saved.")
 
@@ -110,10 +113,6 @@ async def cleanup_unclicked_request(request_key: str, chat_id: int):
 admin_temp_state = {}
 
 # --- Telegram Bot Handlers ---
-# Stores {admin_id: {'file_hash': '...', 'file_name': '...'}}
-admin_temp_state = {}
-
-# --- Telegram Bot Handlers ---
 
 def extract_ad_url(message: Message):
     """Identifies an ad by looking for inline buttons or text links."""
@@ -134,10 +133,6 @@ def extract_ad_url(message: Message):
             elif entity.type == 'url':
                 return text[entity.offset:entity.offset+entity.length]
     return None
-
-import re # Added for clean_filename_for_display
-from typing import Optional # Added for extract_channel_short_name_from_filename
-
 
 def clean_filename_for_display(filename: str) -> str:
     """Extracts a clean title from a subtitle filename."""
@@ -377,7 +372,7 @@ async def view_stats(message: Message):
                     lines.append(f"  └ File <code>{f_row['file_hash']}</code>: {f_row['count']} times")
                 lines.append("")
         
-    text = "\n".join(lines) # Ensure text is built before checking length
+    text = "\n".join(lines)
     if len(text) > 4000:
         text = text[:4000] + "\n... (truncated)"
     await message.answer(text)
@@ -393,7 +388,7 @@ async def handle_admin_upload(message: Message):
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
             cursor.execute("INSERT INTO files (hash, file_id) VALUES (%s, %s)", (file_hash, file_id))
-
+    
     # --- NEW LOGIC: Try to auto-detect channel from filename ---
     short_name_from_filename = extract_channel_short_name_from_filename(original_filename)
     
@@ -413,7 +408,7 @@ async def handle_admin_upload(message: Message):
                     display_name = clean_filename_for_display(original_filename)
                     
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="DOWNLOAD SUBTITLE", url=deep_link)]
+                        [InlineKeyboardButton(text="⬇️ Download Subtitle", url=deep_link)]
                     ])
                     
                     try:
@@ -433,7 +428,7 @@ async def handle_admin_upload(message: Message):
                         await message.answer(f"❌ An unexpected error occurred during auto-post: {e}\n\nFalling back to manual selection.", parse_mode=ParseMode.HTML)
     # --- END NEW LOGIC ---
 
-    # Fallback to manual channel selection if auto-detection failed or no short name was found or an error occurred
+    # Fallback to manual channel selection if auto-detection failed or no short name was found
     # Store file info temporarily for channel selection
     admin_temp_state[message.from_user.id] = {
         'file_hash': file_hash,
@@ -463,7 +458,7 @@ async def handle_admin_upload(message: Message):
         parse_mode=ParseMode.HTML
     )
 
-@dp.message(F.document) # This should be below handle_admin_upload to act as a fallback
+@dp.message(F.document)
 async def handle_unauthorized_upload(message: Message):
     """Catches document uploads from non-admins for debugging."""
     await message.answer(
@@ -473,7 +468,7 @@ async def handle_unauthorized_upload(message: Message):
         f"If these numbers don't match, you must update the ADMIN_ID variable in your Render dashboard!"
     )
 
-@dp.channel_post() # This should be before other message handlers to catch channel posts
+@dp.channel_post()
 async def track_channel_ads(message: Message):
     """Monitors any channel the bot is in to automatically log ads."""
     ad_url = extract_ad_url(message)
@@ -486,7 +481,7 @@ async def track_channel_ads(message: Message):
                                    (message.chat.id, message.message_id, ad_url, time.time()))
                     logging.info(f"New ad registered automatically: {ad_url}")
 
-@dp.message(F.from_user.id == ADMIN_ID, F.forward_from_chat, F.forward_from_chat.type == 'channel') # Corrected filter chaining
+@dp.message(F.from_user.id == ADMIN_ID, F.forward_from_chat, F.forward_from_chat.type == 'channel')
 async def register_previous_ad(message: Message):
     """Admin forwards an old ad from the channel to register it."""
     ad_url = extract_ad_url(message)
@@ -506,10 +501,10 @@ async def register_previous_ad(message: Message):
         await message.reply("❌ No URL found. Is this definitely an ad?")
 
 @dp.message(CommandStart())
-async def handle_start(message: Message, command: CommandStart): # Corrected filter chaining
+async def handle_start(message: Message, command: CommandStart):
     """Handles the user clicking the deep link."""
     file_hash = command.args
-
+    
     user_id = message.from_user.id
     
     request_key = f"{user_id}_{file_hash}"
@@ -517,8 +512,8 @@ async def handle_start(message: Message, command: CommandStart): # Corrected fil
     ad_url = "https://example.com"
     ad_msg_id = None
     ad_channel_id = None
-
-    fwd_msg_id = None # Message ID of the forwarded ad
+    
+    fwd_msg_id = None
     user_msg_id = message.message_id # The /start message from the user
     bot_reply_msg_id = None # The bot's message with the inline buttons
     max_ad_attempts = 5 # Prevent infinite loops if all ads are bad
@@ -527,7 +522,7 @@ async def handle_start(message: Message, command: CommandStart): # Corrected fil
     # Connect to DB once for the whole ad selection process
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            # Check if file exists first (moved inside the DB connection block)
+            # Check if file exists first
             cursor.execute("SELECT file_id FROM files WHERE hash = %s", (file_hash,))
             if not file_hash or not cursor.fetchone(): # Use fetchone() to check existence
                 return await message.answer("Welcome! Please use a valid file request link.")
@@ -591,7 +586,7 @@ async def handle_start(message: Message, command: CommandStart): # Corrected fil
         )).message_id
     else:
         bot_reply_msg_id = (await message.answer(
-            "<b>Verification Required</b>\n\n"
+            f"<b>Verification Required</b>\n\n"
             f"Please click the verification button below.\n\n"
             f"<i>(No specific ad available at the moment.)</i>",
             reply_markup=keyboard
@@ -613,7 +608,7 @@ async def serve_file(callback: CallbackQuery):
     user_id = callback.from_user.id
     file_hash = callback.data.split("_")[1]
     request_key = f"{user_id}_{file_hash}"
-
+    
     file_id = None
     user_msg_id = None
     bot_fwd_msg_id = None
@@ -633,7 +628,7 @@ async def serve_file(callback: CallbackQuery):
             if not req['verified']:
                 return await callback.answer("❌ You must click the 'Click Ad to Verify' button first!", show_alert=True)
                 
-            user_msg_id = req.get('user_msg_id') # User's /start message ID
+            user_msg_id = req.get('user_msg_id')
             bot_fwd_msg_id = req.get('bot_fwd_msg_id')
             bot_reply_msg_id = req.get('bot_reply_msg_id')
 
@@ -655,7 +650,7 @@ async def serve_file(callback: CallbackQuery):
         sent_file = await bot.send_document(user_id, file_id, caption=caption)
         
         # Clean up previous messages
-        msgs_to_delete = [callback.message.message_id] # The bot's reply message with the inline buttons
+        msgs_to_delete = [callback.message.message_id] # The message with the inline buttons
         # if user_msg_id: msgs_to_delete.append(user_msg_id) # User's /start message - generally not deleted
         if bot_fwd_msg_id: msgs_to_delete.append(bot_fwd_msg_id) # The forwarded ad
         if bot_reply_msg_id: msgs_to_delete.append(bot_reply_msg_id) # The bot's reply with buttons (if different from callback.message.message_id)
@@ -674,19 +669,19 @@ async def serve_file(callback: CallbackQuery):
         
     await callback.answer()
 
-@dp.message(Command("ping")) # Corrected filter chaining
+@dp.message(Command("ping"))
 async def ping_handler(message: Message):
     """Simple command to test if the bot is alive."""
     await message.answer("🏓 Pong! The bot is online and actively receiving messages.")
 
-@dp.message(Command("help")) # Explicitly handle /help
+@dp.message()
 async def help_command(message: Message):
     """Provides help information to the user."""
     await message.answer("👋 Welcome! I'm a bot that helps you download subtitle files.\n\n"
                          "To get a subtitle, you need a special link, usually found in channels where I post. Click that link to start the process!\n\n"
                          "I'll ask you to click an ad to verify, then I'll send you the file. Easy!")
 
-@dp.message() # Catch-all should be the last handler registered
+@dp.message() # This is the actual implementation
 async def catch_all(message: Message):
     """Catches all other messages to let you know the bot is alive but confused."""
     await message.answer(f"🤖 I am alive! But I only understand Subtitle Files.\n\nPlease make sure you are sending your subtitle as an attached <b>Document/File</b>.\nYour ID: <code>{message.from_user.id}</code>")
