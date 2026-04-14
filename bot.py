@@ -10,6 +10,7 @@ import traceback
 from dotenv import load_dotenv
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest, TelegramNotFound
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent
 from aiogram.client.default import DefaultBotProperties
@@ -206,26 +207,63 @@ async def handle_start(message: Message, command: CommandStart):
     ad_msg_id = None
     ad_channel_id = None
     
+    fwd_msg_id = None
+    user_msg_id = message.message_id
+
+    max_ad_attempts = 5 # Prevent infinite loops if all ads are bad
+    attempt_count = 0
+    
+    # Connect to DB once for the whole ad selection process
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # Check if file exists first
             cursor.execute("SELECT file_id FROM files WHERE hash = %s", (file_hash,))
-            if not file_hash or not cursor.fetchone():
+            if not file_hash or not cursor.fetchone(): # Use fetchone() to check existence
                 return await message.answer("Welcome! Please use a valid file request link.")
                 
+            # Loop to find a valid ad to forward
+            while attempt_count < max_ad_attempts:
+                # Clean up ads older than 24 hours (86400 seconds) from DB
+                cursor.execute("DELETE FROM ads WHERE %s - timestamp > 86400", (time.time(),))
+                
+                cursor.execute("SELECT channel_id, message_id, url FROM ads")
+                ads_db = cursor.fetchall()
+
+                if not ads_db:
+                    # No ads available, break loop and use fallback
+                    break 
+
+                selected_ad = random.choice(ads_db)
+                ad_url, ad_msg_id, ad_channel_id = selected_ad['url'], selected_ad['message_id'], selected_ad['channel_id']
+
+                try:
+                    # Attempt to forward the ad
+                    sent_fwd = await bot.forward_message(
+                        chat_id=user_id,
+                        from_chat_id=ad_channel_id,
+                        message_id=ad_msg_id
+                    )
+                    fwd_msg_id = sent_fwd.message_id
+                    # If successful, break the loop
+                    break 
+                except (TelegramBadRequest, TelegramNotFound) as e:
+                    logging.warning(f"Ad message {ad_msg_id} in channel {ad_channel_id} not found or deleted. Removing from DB. Error: {e}")
+                    # If ad is deleted, remove it from DB and try again
+                    cursor.execute("DELETE FROM ads WHERE channel_id = %s AND message_id = %s", (ad_channel_id, ad_msg_id))
+                    conn.commit() # Commit deletion immediately
+                    ad_msg_id = None # Reset to ensure fallback if no other ads work
+                    attempt_count += 1
+                except Exception as e:
+                    logging.error(f"Unexpected error forwarding ad {ad_msg_id}: {e}")
+                    ad_msg_id = None
+                    attempt_count += 1
+            
             cursor.execute("""
                 INSERT INTO users (user_id, name, total_requests, successful_receives) 
                 VALUES (%s, %s, 1, 0) 
                 ON CONFLICT(user_id) DO UPDATE SET total_requests = users.total_requests + 1, name = EXCLUDED.name
             """, (user_id, message.from_user.full_name))
             
-            cursor.execute("DELETE FROM ads WHERE %s - timestamp > 86400", (time.time(),))
-            
-            cursor.execute("SELECT channel_id, message_id, url FROM ads")
-            ads_db = cursor.fetchall()
-            if ads_db:
-                selected_ad = random.choice(ads_db)
-                ad_url, ad_msg_id, ad_channel_id = selected_ad['url'], selected_ad['message_id'], selected_ad['channel_id']
-
     track_url = f"{WEB_APP_DOMAIN}/track?u={user_id}&h={file_hash}"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -233,16 +271,7 @@ async def handle_start(message: Message, command: CommandStart):
         [InlineKeyboardButton(text="2️⃣ Get Subtitle File", callback_data=f"get_{file_hash}")]
     ])
     
-    fwd_msg_id = None
-    user_msg_id = message.message_id
-
     if ad_msg_id and ad_channel_id:
-        sent_fwd = await bot.forward_message(
-            chat_id=user_id,
-            from_chat_id=ad_channel_id,
-            message_id=ad_msg_id
-        )
-        fwd_msg_id = sent_fwd.message_id
         await message.answer(
             "<b>Verification Required</b>\n\n"
             "Please click the 'Click Ad to Verify' button below.\n"
@@ -252,7 +281,8 @@ async def handle_start(message: Message, command: CommandStart):
     else:
         await message.answer(
             f"<b>Verification Required</b>\n\n"
-            f"Please click the verification button below.\n\n", 
+            f"Please click the verification button below.\n\n"
+            f"<i>(No specific ad available at the moment.)</i>",
             reply_markup=keyboard
         )
         
