@@ -6,11 +6,12 @@ import logging
 import random
 import psycopg2
 import psycopg2.extras
+import traceback
 from dotenv import load_dotenv
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
@@ -44,6 +45,22 @@ if DATABASE_URL:
             cursor.execute('''CREATE TABLE IF NOT EXISTS user_file_requests (user_id BIGINT, file_hash TEXT, count INTEGER DEFAULT 0, PRIMARY KEY(user_id, file_hash))''')
 else:
     logging.error("DATABASE_URL is not set! Data will not be saved.")
+
+# --- Error Logger ---
+@dp.error()
+async def global_error_handler(event: ErrorEvent):
+    """Catches all errors and sends a message to the Admin for debugging."""
+    logging.error(f"Update: {event.update}\nException: {event.exception}")
+    traceback.print_exception(type(event.exception), event.exception, event.exception.__traceback__)
+    
+    if ADMIN_ID:
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🚨 <b>BOT ERROR!</b>\n\n<code>{event.exception}</code>\n\nCheck Render logs for full details."
+            )
+        except Exception:
+            pass
 
 # --- Telegram Bot Handlers ---
 
