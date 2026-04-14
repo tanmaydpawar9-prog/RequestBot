@@ -103,6 +103,10 @@ async def delete_message_later(chat_id: int, message_id: int, delay: int):
                 cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,)) # Delete the request from DB
                 conn.commit()
 
+# --- Temporary Admin State (for multi-step commands) ---
+# Stores {admin_id: {'file_hash': '...', 'file_name': '...'}}
+admin_temp_state = {}
+
 # --- Utility Functions ---
 
 # --- Telegram Bot Handlers ---
