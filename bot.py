@@ -43,6 +43,12 @@ if DATABASE_URL:
             # Statistics Tables
             cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, name TEXT, total_requests INTEGER DEFAULT 0, successful_receives INTEGER DEFAULT 0)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS user_file_requests (user_id BIGINT, file_hash TEXT, count INTEGER DEFAULT 0, PRIMARY KEY(user_id, file_hash))''')
+            
+            # Add message tracking columns for cleanup if they don't exist yet
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='requests' AND column_name='user_msg_id'")
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE requests ADD COLUMN user_msg_id BIGINT")
+                cursor.execute("ALTER TABLE requests ADD COLUMN bot_fwd_msg_id BIGINT")
 else:
     logging.error("DATABASE_URL is not set! Data will not be saved.")
 
@@ -61,6 +67,14 @@ async def global_error_handler(event: ErrorEvent):
             )
         except Exception:
             pass
+
+async def delete_message_later(chat_id: int, message_id: int, delay: int):
+    """Deletes a message after a specified delay in seconds."""
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception as e:
+        logging.error(f"Failed to delete delayed message: {e}")
 
 # --- Telegram Bot Handlers ---
 
@@ -212,11 +226,6 @@ async def handle_start(message: Message, command: CommandStart):
                 selected_ad = random.choice(ads_db)
                 ad_url, ad_msg_id, ad_channel_id = selected_ad['url'], selected_ad['message_id'], selected_ad['channel_id']
 
-            cursor.execute("""
-                INSERT INTO requests (request_key, verified, timestamp, target_url) VALUES (%s, 0, %s, %s)
-                ON CONFLICT(request_key) DO UPDATE SET verified = 0, timestamp = EXCLUDED.timestamp, target_url = EXCLUDED.target_url
-            """, (request_key, time.time(), ad_url))
-    
     track_url = f"{WEB_APP_DOMAIN}/track?u={user_id}&h={file_hash}"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -224,24 +233,36 @@ async def handle_start(message: Message, command: CommandStart):
         [InlineKeyboardButton(text="2️⃣ Get Subtitle File", callback_data=f"get_{file_hash}")]
     ])
     
+    fwd_msg_id = None
+    user_msg_id = message.message_id
+
     if ad_msg_id and ad_channel_id:
-        await bot.forward_message(
+        sent_fwd = await bot.forward_message(
             chat_id=user_id,
             from_chat_id=ad_channel_id,
             message_id=ad_msg_id
         )
+        fwd_msg_id = sent_fwd.message_id
         await message.answer(
-            "👆 <b>Please click the ad above to verify!</b>\n\n"
-            "After verifying, click the button below to get your file.",
+            "<b>Verification Required</b>\n\n"
+            "Please click the 'Click Ad to Verify' button below.\n"
+            "After verifying, click 'Get Subtitle File' to receive your file.",
             reply_markup=keyboard
         )
     else:
         await message.answer(
             f"<b>Verification Required</b>\n\n"
-            f"To get your file, please support us by clicking the ad below.\n\n"
-            f"<i>Ad:</i>\nPlease support us by visiting our sponsor!", 
+            f"Please click the verification button below.\n\n", 
             reply_markup=keyboard
         )
+        
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO requests (request_key, verified, timestamp, target_url, user_msg_id, bot_fwd_msg_id) 
+                VALUES (%s, 0, %s, %s, %s, %s)
+                ON CONFLICT(request_key) DO UPDATE SET verified = 0, timestamp = EXCLUDED.timestamp, target_url = EXCLUDED.target_url, user_msg_id = EXCLUDED.user_msg_id, bot_fwd_msg_id = EXCLUDED.bot_fwd_msg_id
+            """, (request_key, time.time(), ad_url, user_msg_id, fwd_msg_id))
 
 @dp.callback_query(F.data.startswith("get_"))
 async def serve_file(callback: CallbackQuery):
@@ -251,9 +272,11 @@ async def serve_file(callback: CallbackQuery):
     request_key = f"{user_id}_{file_hash}"
     
     file_id = None
+    user_msg_id = None
+    bot_fwd_msg_id = None
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute("SELECT verified, timestamp FROM requests WHERE request_key = %s", (request_key,))
+            cursor.execute("SELECT verified, timestamp, user_msg_id, bot_fwd_msg_id FROM requests WHERE request_key = %s", (request_key,))
             req = cursor.fetchone()
             
             if not req:
@@ -266,6 +289,9 @@ async def serve_file(callback: CallbackQuery):
             if not req['verified']:
                 return await callback.answer("❌ You must click the 'Click Ad to Verify' button first!", show_alert=True)
                 
+            user_msg_id = req.get('user_msg_id')
+            bot_fwd_msg_id = req.get('bot_fwd_msg_id')
+
             cursor.execute("SELECT file_id FROM files WHERE hash = %s", (file_hash,))
             file_row = cursor.fetchone()
             
@@ -280,7 +306,22 @@ async def serve_file(callback: CallbackQuery):
             cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,))
             
     if file_id:
-        await bot.send_document(user_id, file_id, caption="✅ Here is your requested subtitle file!")
+        caption = "✅ Here is your requested subtitle file!\n\n⏳ <i>This file will be automatically deleted in 5 minutes.</i>"
+        sent_file = await bot.send_document(user_id, file_id, caption=caption)
+        
+        # Clean up previous messages
+        msgs_to_delete = [callback.message.message_id]
+        if user_msg_id: msgs_to_delete.append(user_msg_id)
+        if bot_fwd_msg_id: msgs_to_delete.append(bot_fwd_msg_id)
+        
+        for m_id in msgs_to_delete:
+            try:
+                await bot.delete_message(user_id, m_id)
+            except Exception:
+                pass
+                
+        # Schedule deletion of the subtitle file
+        asyncio.create_task(delete_message_later(user_id, sent_file.message_id, 300))
     else:
         await callback.answer("File no longer available.", show_alert=True)
         
