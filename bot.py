@@ -1036,7 +1036,12 @@ async def serve_file(callback: CallbackQuery):
             bot_reply_msg_id = req.get('bot_reply_msg_id') # Now this will be fetched correctly
             download_filename = req.get('download_filename')
 
-            cursor.execute("SELECT file_id FROM files WHERE hash = %s", (file_hash,))
+            cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
+            cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
+            cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
+            cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
+            cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
+            cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
             file_row = cursor.fetchone()
             if file_row: # type: ignore
                 cursor.execute("UPDATE users SET successful_receives = successful_receives + 1 WHERE user_id = %s", (user_id,))
@@ -1045,6 +1050,8 @@ async def serve_file(callback: CallbackQuery):
                     ON CONFLICT(user_id, file_hash) DO UPDATE SET count = user_file_requests.count + 1
                 """, (user_id, file_hash))
                 file_id = file_row[0]
+                if not download_filename:
+                    download_filename = file_row[1]
                 
             cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,))
             
@@ -1210,7 +1217,8 @@ async def track_click(request: web.Request):
     user_id = request.query.get("u")
     file_hash = request.query.get("h")
     
-    
+    target_url = "https://t.me/TheFrictionRealm" # Fallback if none found
+
     if user_id and file_hash:
         request_key = f"{user_id}_{file_hash}"
         with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
