@@ -821,7 +821,7 @@ async def serve_file(callback: CallbackQuery):
     bot_reply_msg_id = None
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute("SELECT verified, timestamp, user_msg_id, bot_fwd_msg_id FROM requests WHERE request_key = %s", (request_key,))
+            cursor.execute("SELECT verified, timestamp, user_msg_id, bot_fwd_msg_id, bot_reply_msg_id FROM requests WHERE request_key = %s", (request_key,))
             req = cursor.fetchone()
             
             if not req:
@@ -836,7 +836,7 @@ async def serve_file(callback: CallbackQuery):
                 
             user_msg_id = req.get('user_msg_id')
             bot_fwd_msg_id = req.get('bot_fwd_msg_id')
-            bot_reply_msg_id = req.get('bot_reply_msg_id')
+            bot_reply_msg_id = req.get('bot_reply_msg_id') # Now this will be fetched correctly
 
             cursor.execute("SELECT file_id FROM files WHERE hash = %s", (file_hash,))
             file_row = cursor.fetchone()
@@ -856,10 +856,9 @@ async def serve_file(callback: CallbackQuery):
         sent_file = await bot.send_document(user_id, file_id, caption=caption)
         
         # Clean up previous messages
-        msgs_to_delete = [callback.message.message_id] # The message with the inline buttons
-        # if user_msg_id: msgs_to_delete.append(user_msg_id) # User's /start message - generally not deleted
-        if bot_fwd_msg_id: msgs_to_delete.append(bot_fwd_msg_id) # The forwarded ad
-        if bot_reply_msg_id: msgs_to_delete.append(bot_reply_msg_id) # The bot's reply with buttons (if different from callback.message.message_id)
+        msgs_to_delete = {callback.message.message_id} # Use a set to avoid duplicates
+        if bot_fwd_msg_id: msgs_to_delete.add(bot_fwd_msg_id) # The forwarded ad
+        if bot_reply_msg_id: msgs_to_delete.add(bot_reply_msg_id) # The bot's reply with buttons
 
         # Delete messages
         for m_id in msgs_to_delete:
