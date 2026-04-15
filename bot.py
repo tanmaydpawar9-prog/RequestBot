@@ -1089,14 +1089,11 @@ async def serve_file(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("verify_join_"))
 async def handle_join_verification(callback: CallbackQuery):
     """Handles the 'I have joined' button click."""
-    # Split into 'verify', 'join', HASH, and the rest is the FILENAME.
-    # This prevents filenames with underscores from breaking the logic.
-    parts = callback.data.split("_", 3)
+    # Split into 'verify', 'join', HASH
+    parts = callback.data.split("_")
     file_hash = parts[2]
-    download_filename_override = parts[3] if len(parts) > 3 else None
-
-    if download_filename_override:
-        download_filename_override = unquote(download_filename_override) # Decode URL-encoded filename from callback data
+    # download_filename_override is no longer passed via callback data
+    download_filename_override = None
     user_id = callback.from_user.id
     user_full_name = callback.from_user.full_name
 
@@ -1111,7 +1108,7 @@ async def handle_join_verification(callback: CallbackQuery):
             await callback.answer("Thank you for joining! Please wait... 🙏", show_alert=False)
             await callback.message.delete()
             # We don't have the original user message ID, but it's not critical. Pass 0.
-            await proceed_with_verification(user_id, user_full_name, file_hash, 0, download_filename_override)
+            await proceed_with_verification(user_id, user_full_name, file_hash, 0)
         else:
             # User has not joined
             await callback.answer("❌ You haven't joined the channel yet. Please join and then click the button again. 🧐", show_alert=True)
