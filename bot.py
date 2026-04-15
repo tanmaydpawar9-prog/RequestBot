@@ -5,6 +5,7 @@ import asyncio
 import logging
 import random
 import psycopg2
+import traceback
 import psycopg2.extras
 import re
 from dotenv import load_dotenv
@@ -82,6 +83,31 @@ async def global_error_handler(event: ErrorEvent):
         except Exception:
             pass
 
+async def cleanup_unclicked_request(request_key: str, chat_id: int, delay: int = 300):
+    """Deletes the verification messages if the user doesn't click the ad link in time."""
+    await asyncio.sleep(delay)
+    
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # Check if the request is still unverified
+            cursor.execute("SELECT verified, bot_fwd_msg_id, bot_reply_msg_id FROM requests WHERE request_key = %s", (request_key,))
+            req = cursor.fetchone()
+
+            if req and not req['verified']:
+                logging.info(f"Cleaning up unclicked request {request_key} for user {chat_id}")
+                
+                # Delete bot's messages
+                if req['bot_fwd_msg_id']:
+                    try: await bot.delete_message(chat_id, req['bot_fwd_msg_id'])
+                    except (TelegramNotFound, TelegramBadRequest): pass
+                if req['bot_reply_msg_id']:
+                    try: await bot.delete_message(chat_id, req['bot_reply_msg_id'])
+                    except (TelegramNotFound, TelegramBadRequest): pass
+                
+                # Delete the request from DB
+                cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,))
+                conn.commit()
+
 async def delete_message_later(chat_id: int, message_id: int, delay: int):
     """Deletes a message after a specified delay in seconds."""
     await asyncio.sleep(delay)
@@ -89,27 +115,6 @@ async def delete_message_later(chat_id: int, message_id: int, delay: int):
         await bot.delete_message(chat_id, message_id)
     except Exception as e:
         logging.error(f"Failed to delete delayed message: {e}")
-
-    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute("SELECT verified, bot_fwd_msg_id, bot_reply_msg_id FROM requests WHERE request_key = %s", (request_key,))
-            req = cursor.fetchone()
-
-            if req and not req['verified']: # If request exists and is still unverified
-                logging.info(f"Cleaning up unclicked request {request_key} for user {chat_id}")
-                
-                # Delete bot's messages
-                if req['bot_fwd_msg_id']:
-                    try: await bot.delete_message(chat_id, req['bot_fwd_msg_id'])
-                    except (TelegramNotFound, TelegramBadRequest): pass # Already deleted or invalid
-                    except Exception as e: logging.error(f"Error deleting forwarded ad for {chat_id}: {e}")
-                if req['bot_reply_msg_id']:
-                    try: await bot.delete_message(chat_id, req['bot_reply_msg_id'])
-                    except (TelegramNotFound, TelegramBadRequest): pass # Already deleted or invalid
-                    except Exception as e: logging.error(f"Error deleting bot reply for {chat_id}: {e}")
-                
-                cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,)) # Delete the request from DB
-                conn.commit()
 
 # --- Temporary Admin State (for multi-step commands) ---
 # Stores {admin_id: {'file_hash': '...', 'file_name': '...'}}
@@ -241,6 +246,7 @@ async def post_to_channel_callback(callback: CallbackQuery):
             bot_info = await bot.me()
             deep_link = f"https://t.me/{bot_info.username}?start={file_hash}"
             
+            display_name = clean_filename_for_display(original_filename)
             # Extract episode information from the original filename
             episode_match = re.search(r'\b(EP\d+|S\d+E\d+)\b', original_filename, re.IGNORECASE)
             episode_info = episode_match.group(0).upper() if episode_match else "" # e.g., "EP136"
@@ -665,24 +671,29 @@ async def track_channel_ads(message: Message):
                                    (message.chat.id, message.message_id, ad_url, time.time()))
                     logging.info(f"New ad registered automatically from Ads Bot: {ad_url}")
 
-@dp.message(F.from_user.id == ADMIN_ID, F.forward_from_chat, F.forward_from_chat.type == 'channel')
-async def register_previous_ad(message: Message):
-    """Admin forwards an old ad from the channel to register it."""
-    ad_url = extract_ad_url(message)
+@dp.message(Command("addad"), F.from_user.id == ADMIN_ID, F.reply_to_message)
+async def register_previous_ad_command(message: Message):
+    """Admin replies to a forwarded ad with /addad to register it."""
+    forwarded_message = message.reply_to_message
+
+    if not forwarded_message.forward_from_chat or forwarded_message.forward_from_chat.type != 'channel':
+        return await message.reply("❌ This command only works when replying to a message forwarded from a channel.")
+
+    ad_url = extract_ad_url(forwarded_message)
     if ad_url:
-        orig_msg_id = message.forward_from_message_id
-        channel_id = message.forward_from_chat.id
+        orig_msg_id = forwarded_message.forward_from_message_id
+        channel_id = forwarded_message.forward_from_chat.id
         
         with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT 1 FROM ads WHERE message_id = %s", (orig_msg_id,))
+                cursor.execute("SELECT 1 FROM ads WHERE message_id = %s AND channel_id = %s", (orig_msg_id, channel_id))
                 if not cursor.fetchone():
                     cursor.execute("INSERT INTO ads (channel_id, message_id, url, timestamp) VALUES (%s, %s, %s, %s)", (channel_id, orig_msg_id, ad_url, time.time()))
-                    await message.reply(f"✅ Previous ad (ID: {orig_msg_id}) successfully registered into rotation!")
+                    await message.reply(f"✅ Ad (ID: {orig_msg_id}) successfully registered!")
                 else:
                     await message.reply("⚠️ This ad is already in the database.")
     else:
-        await message.reply("❌ No URL found. Is this definitely an ad?")
+        await message.reply("❌ No URL found in the replied message. Is this an ad?")
 
 @dp.message(CommandStart())
 async def handle_start(message: Message, command: CommandStart):
@@ -784,7 +795,7 @@ async def handle_start(message: Message, command: CommandStart):
             """, (request_key, time.time(), ad_url, user_msg_id, fwd_msg_id, bot_reply_msg_id))
     
     # Schedule cleanup if user doesn't interact
-    asyncio.create_task(cleanup_unclicked_request(request_key, user_id))
+    asyncio.create_task(cleanup_unclicked_request(request_key, user_id, delay=300))
 
 @dp.callback_query(F.data.startswith("get_"))
 async def serve_file(callback: CallbackQuery):
