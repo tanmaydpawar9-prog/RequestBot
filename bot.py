@@ -1063,15 +1063,15 @@ async def serve_file(callback: CallbackQuery):
             sent_file = await bot.send_document(user_id, file_id, caption=caption, parse_mode=ParseMode.HTML)
 
         # Clean up previous messages
-        msgs_to_delete = {callback.message.message_id} # Use a set to avoid duplicates
+        msgs_to_delete = {callback.message.message_id}  # The message with the buttons
+        if user_msg_id: msgs_to_delete.add(user_msg_id)  # The user's original /start command
         if bot_fwd_msg_id: msgs_to_delete.add(bot_fwd_msg_id) # The forwarded ad
-        if bot_reply_msg_id: msgs_to_delete.add(bot_reply_msg_id) # The bot's reply with buttons
 
         # Delete messages
         for m_id in msgs_to_delete:
             try:
                 await bot.delete_message(user_id, m_id)
-            except Exception:
+            except (TelegramNotFound, TelegramBadRequest):
                 pass
                 
         # Schedule deletion of the subtitle file
@@ -1085,11 +1085,11 @@ async def serve_file(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("verify_join_"))
 async def handle_join_verification(callback: CallbackQuery):
     """Handles the 'I have joined' button click."""
-    parts = callback.data.split("_")
-    file_hash = parts[2] # verify_join_HASH
+    # Split into 'verify', 'join', HASH, and the rest is the FILENAME.
+    # This prevents filenames with underscores from breaking the logic.
+    parts = callback.data.split("_", 3)
+    file_hash = parts[2]
     download_filename_override = parts[3] if len(parts) > 3 else None
-    if download_filename_override:
-        download_filename_override = download_filename_override.replace("%20", " ") # Decode spaces
 
     user_id = callback.from_user.id
     user_full_name = callback.from_user.full_name
