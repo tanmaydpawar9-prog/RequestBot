@@ -582,7 +582,7 @@ async def handle_admin_upload(message: Message):
 
                     # Construct the desired filename for the download
                     file_extension = os.path.splitext(original_filename)[1] or ".ass" # Default to .ass
-                    download_filename = f"[ENG] {short_name} {episode_info} @{bot_info.username}{file_extension}".strip().replace("  ", " ")
+                    download_filename = f"[ENG] {short_name_from_filename} {episode_info} @{bot_info.username}{file_extension}".strip().replace("  ", " ")
 
                     deep_link = f"https://t.me/{bot_info.username}?start={file_hash}_{download_filename}"
                     
