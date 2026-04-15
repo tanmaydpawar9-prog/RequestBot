@@ -1037,11 +1037,6 @@ async def serve_file(callback: CallbackQuery):
             download_filename = req.get('download_filename')
 
             cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
-            cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
-            cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
-            cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
-            cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
-            cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
             file_row = cursor.fetchone()
             if file_row: # type: ignore
                 cursor.execute("UPDATE users SET successful_receives = successful_receives + 1 WHERE user_id = %s", (user_id,))
