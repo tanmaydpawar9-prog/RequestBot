@@ -13,7 +13,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest, TelegramNotFound
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ErrorEvent, BufferedInputFile, ChatMemberOwner, ChatMemberAdministrator
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
@@ -616,6 +616,46 @@ async def handle_unauthorized_upload(message: Message):
         f"If these numbers don't match, you must update the ADMIN_ID variable in your Render dashboard!"
     )
 
+@dp.message(Command("check_dest"), F.from_user.id == ADMIN_ID)
+async def check_destination_channel(message: Message):
+    """Admin command to verify the bot can access the destination channel."""
+    if not DESTINATION_CHANNEL_ID:
+        return await message.answer("⚠️ The `DESTINATION_CHANNEL_ID` is not set. Please configure it in your environment variables.")
+
+    try:
+        chat = await bot.get_chat(DESTINATION_CHANNEL_ID)
+        my_member_info = await bot.get_chat_member(DESTINATION_CHANNEL_ID, bot.id)
+        
+        can_post = False
+        status = my_member_info.status.capitalize()
+        if isinstance(my_member_info, ChatMemberOwner):
+            can_post = True
+        elif isinstance(my_member_info, ChatMemberAdministrator):
+            if my_member_info.can_post_messages:
+                can_post = True
+
+        perm_text = "✅ Can post photos" if can_post else "❌ Cannot post photos"
+        
+        await message.answer(
+            f"✅ <b>Destination Channel Check: OK</b>\n\n"
+            f"The bot can access the destination channel.\n\n"
+            f"<b>Name:</b> {chat.title}\n"
+            f"<b>ID:</b> <code>{chat.id}</code>\n"
+            f"<b>Bot Status:</b> {status}\n"
+            f"<b>Permissions:</b> {perm_text}"
+        )
+    except TelegramNotFound:
+        await message.answer(
+            f"🚨 <b>Destination Channel Check: FAILED</b>\n\n"
+            f"The bot could not find the channel with ID: <code>{DESTINATION_CHANNEL_ID}</code>.\n\n"
+            f"<b>This is the reason the `/post` command is failing with 'chat not found'.</b>\n\n"
+            f"<b>How to fix:</b>\n"
+            f"1. Make sure the `DESTINATION_CHANNEL_ID` in your environment variables is correct.\n"
+            f"2. Add the bot to your destination channel as an admin."
+        )
+    except Exception as e:
+        await message.answer(f"An unexpected error occurred while checking the channel: {e}")
+
 @dp.message(Command("post"), F.from_user.id == ADMIN_ID, F.reply_to_message)
 async def post_forwarded_message(message: Message):
     """
@@ -661,9 +701,19 @@ async def post_forwarded_message(message: Message):
         await bot.send_photo(chat_id=DESTINATION_CHANNEL_ID, photo=photo_file_id, caption=forwarded_message.caption, caption_entities=forwarded_message.caption_entities, reply_markup=keyboard)
         await message.reply(f"✅ Successfully posted to channel <code>{DESTINATION_CHANNEL_ID}</code>.", parse_mode=ParseMode.HTML)
         logging.info(f"Admin {message.from_user.id} successfully posted message {forwarded_message.forward_from_message_id} to channel {DESTINATION_CHANNEL_ID}.")
+    except TelegramBadRequest as e:
+        logging.error(f"Failed to post forwarded message for admin. Error: {e}")
+        error_message = str(e)
+        reply_text = f"🚨 <b>Posting Failed!</b>\n\nCould not send the post to the destination channel (ID: <code>{DESTINATION_CHANNEL_ID}</code>).\n\n<b>Error:</b>\n<code>{error_message}</code>\n\n"
+        
+        if "chat not found" in error_message.lower():
+            reply_text += "<b>Suggestion:</b> This error means the bot cannot find the channel. Please ensure:\n1. The `DESTINATION_CHANNEL_ID` is correct.\n2. The bot has been added as a member (or admin) to the channel."
+        else:
+            reply_text += "<b>Suggestion:</b> Make sure the bot is an admin in the destination channel with permission to post photos."
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logging.error(f"Failed to post forwarded message for admin. Error: {e}")
-        await message.reply(f"🚨 <b>Posting Failed!</b>\n\nCould not send the post to the destination channel (ID: <code>{DESTINATION_CHANNEL_ID}</code>).\n\n<b>Error:</b>\n<code>{e}</code>\n\nMake sure the bot is an admin in the destination channel with permission to post photos.", parse_mode=ParseMode.HTML)
+        await message.reply(f"🚨 <b>An unexpected error occurred!</b>\n\n<b>Error:</b>\n<code>{e}</code>\n\nCheck the bot logs for more details.", parse_mode=ParseMode.HTML)
 
 @dp.channel_post()
 async def track_channel_ads(message: Message):
