@@ -72,6 +72,11 @@ if DATABASE_URL:
             if not cursor.fetchone():
                 cursor.execute("ALTER TABLE user_channel_bindings ADD COLUMN bound_at REAL")
             
+            # Add download_filename column to requests table if it doesn't exist
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='requests' AND column_name='download_filename'")
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE requests ADD COLUMN download_filename TEXT")
+
             # Commit any schema changes
             conn.commit()
 else:
@@ -341,7 +346,7 @@ async def post_to_channel_callback(callback: CallbackQuery):
                     reply_markup=keyboard,
                     parse_mode=ParseMode.HTML
                 )
-                await callback.message.answer(f"✅ Subtitle for '<b>{display_name}</b>' posted to channel '<b>{channel_full_name}</b>'!", parse_mode=ParseMode.HTML)
+                await callback.message.answer(f"✅ Subtitle for '<b>{original_filename}</b>' posted to channel '<b>{channel_full_name}</b>'!", parse_mode=ParseMode.HTML)
             except TelegramBadRequest as e:
                 await callback.message.answer(f"❌ Failed to post to channel '<b>{channel_full_name}</b>'. Error: {e}\n\nMake sure the bot is an admin in the channel and has permission to post messages.", parse_mode=ParseMode.HTML)
             except Exception as e:
@@ -655,7 +660,7 @@ async def handle_admin_upload(message: Message):
                             parse_mode=ParseMode.HTML
                         )
                         # If successful, we are done, return here.
-                        return await message.answer(f"✅ Subtitle for '<b>{display_name}</b>' automatically posted to channel '<b>{channel_full_name}</b>'!", parse_mode=ParseMode.HTML)
+                        return await message.answer(f"✅ Subtitle for '<b>{original_filename}</b>' automatically posted to channel '<b>{channel_full_name}</b>'!", parse_mode=ParseMode.HTML)
                     except TelegramBadRequest as e:
                         # Log error and fall through to manual selection
                         await message.answer(f"❌ Failed to auto-post to channel '<b>{channel_full_name}</b>'. Error: {e}\n\nFalling back to manual selection. Make sure the bot is an admin in the channel and has permission to post messages.", parse_mode=ParseMode.HTML)
@@ -909,7 +914,7 @@ async def register_previous_ad_command(message: Message):
     else:
         await message.reply("❌ No URL found in the replied message. Is this an ad?")
 
-async def proceed_with_verification(chat_id: int, user_full_name: str, file_hash: str, user_msg_id: int):
+async def proceed_with_verification(chat_id: int, user_full_name: str, file_hash: str, user_msg_id: int, download_filename_override: Optional[str] = None):
     """Handles the ad forwarding and verification message sending."""
     request_key = f"{chat_id}_{file_hash}"
     
@@ -996,10 +1001,10 @@ async def proceed_with_verification(chat_id: int, user_full_name: str, file_hash
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
-                INSERT INTO requests (request_key, verified, timestamp, target_url, user_msg_id, bot_fwd_msg_id, bot_reply_msg_id) 
-                VALUES (%s, 0, %s, %s, %s, %s, %s)
-                ON CONFLICT(request_key) DO UPDATE SET verified = 0, timestamp = EXCLUDED.timestamp, target_url = EXCLUDED.target_url, user_msg_id = EXCLUDED.user_msg_id, bot_fwd_msg_id = EXCLUDED.bot_fwd_msg_id, bot_reply_msg_id = EXCLUDED.bot_reply_msg_id
-            """, (request_key, time.time(), ad_url, user_msg_id, fwd_msg_id, bot_reply_msg_id))
+                INSERT INTO requests (request_key, verified, timestamp, target_url, user_msg_id, bot_fwd_msg_id, bot_reply_msg_id, download_filename) 
+                VALUES (%s, 0, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(request_key) DO UPDATE SET verified = 0, timestamp = EXCLUDED.timestamp, target_url = EXCLUDED.target_url, user_msg_id = EXCLUDED.user_msg_id, bot_fwd_msg_id = EXCLUDED.bot_fwd_msg_id, bot_reply_msg_id = EXCLUDED.bot_reply_msg_id, download_filename = EXCLUDED.download_filename
+            """, (request_key, time.time(), ad_url, user_msg_id, fwd_msg_id, bot_reply_msg_id, download_filename_override))
     
     # Schedule cleanup if user doesn't interact
     asyncio.create_task(cleanup_unclicked_request(request_key, chat_id, delay=300))
@@ -1067,6 +1072,9 @@ async def handle_start(message: Message, command: CommandStart):
                         reply_markup=keyboard,
                         parse_mode=ParseMode.HTML
                     )
+        except Exception as e:
+            logging.error(f"Could not check channel membership for user {user_id}. Error: {e}")
+            # If check fails, proceed without verification to not block the user.
     # 3. Proceed to ad verification
     await proceed_with_verification(user_id, user_full_name, file_hash, message.message_id, download_filename_override)
 
@@ -1084,7 +1092,7 @@ async def serve_file(callback: CallbackQuery):
     bot_reply_msg_id = None
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute("SELECT verified, timestamp, user_msg_id, bot_fwd_msg_id, bot_reply_msg_id FROM requests WHERE request_key = %s", (request_key,))
+            cursor.execute("SELECT verified, timestamp, user_msg_id, bot_fwd_msg_id, bot_reply_msg_id, download_filename FROM requests WHERE request_key = %s", (request_key,))
             req = cursor.fetchone()
             
             if not req:
@@ -1100,13 +1108,10 @@ async def serve_file(callback: CallbackQuery):
             user_msg_id = req.get('user_msg_id')
             bot_fwd_msg_id = req.get('bot_fwd_msg_id')
             bot_reply_msg_id = req.get('bot_reply_msg_id') # Now this will be fetched correctly
+            download_filename = req.get('download_filename')
 
             cursor.execute("SELECT file_id FROM files WHERE hash = %s", (file_hash,))
             file_row = cursor.fetchone()
-            
-            # Check if the file_hash contains a custom filename override
-            if '_' in file_hash: # This check is now redundant due to handle_start parsing
-                file_hash, download_filename = file_hash.split('_', 1)
             if file_row: # type: ignore
                 cursor.execute("UPDATE users SET successful_receives = successful_receives + 1 WHERE user_id = %s", (user_id,))
                 cursor.execute("""
@@ -1119,11 +1124,22 @@ async def serve_file(callback: CallbackQuery):
             
     if file_id:
         caption = "✅ Here is your requested subtitle file! 🎉\n\n⏳ <i>This file will be automatically deleted in 5 minutes.</i>"
+        sent_file = None
         if download_filename:
-            # If a custom filename was passed, use it. Otherwise, bot.send_document uses original.
-            sent_file = await bot.send_document(user_id, file_id, caption=caption, parse_mode=ParseMode.HTML, file_name=download_filename)
-        sent_file = await bot.send_document(user_id, file_id, caption=caption, parse_mode=ParseMode.HTML)
-        
+            try:
+                # To send with a custom filename, we must download and re-upload
+                file_info = await bot.get_file(file_id)
+                file_content = await bot.download_file(file_info.file_path)
+                document_to_send = BufferedInputFile(file_content.read(), filename=download_filename)
+                sent_file = await bot.send_document(user_id, document_to_send, caption=caption, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logging.error(f"Failed to re-upload file {file_id} with custom name. Falling back. Error: {e}")
+                # Fallback to sending by file_id if re-upload fails
+                sent_file = await bot.send_document(user_id, file_id, caption=caption, parse_mode=ParseMode.HTML)
+        else:
+            # No custom filename, just send by file_id
+            sent_file = await bot.send_document(user_id, file_id, caption=caption, parse_mode=ParseMode.HTML)
+
         # Clean up previous messages
         msgs_to_delete = {callback.message.message_id} # Use a set to avoid duplicates
         if bot_fwd_msg_id: msgs_to_delete.add(bot_fwd_msg_id) # The forwarded ad
@@ -1137,37 +1153,53 @@ async def serve_file(callback: CallbackQuery):
                 pass
                 
         # Schedule deletion of the subtitle file
-        asyncio.create_task(delete_message_later(user_id, sent_file.message_id, 300))
+        if sent_file:
+            asyncio.create_task(delete_message_later(user_id, sent_file.message_id, 300))
     else:
-        await callback.answer("File no longer available.", show_alert=True)
+        await callback.answer("File no longer available. 😔", show_alert=True)
         
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("verify_join_"))
 async def handle_join_verification(callback: CallbackQuery):
     """Handles the 'I have joined' button click."""
-    file_hash = callback.data.split("_")[2] # verify_join_HASH
+    parts = callback.data.split("_")
+    file_hash = parts[2] # verify_join_HASH
+    download_filename_override = parts[3] if len(parts) > 3 else None
+    if download_filename_override:
+        download_filename_override = download_filename_override.replace("%20", " ") # Decode spaces
+
     user_id = callback.from_user.id
     user_full_name = callback.from_user.full_name
 
-    if not FORCE_JOIN_CHANNEL_ID:
-        await callback.answer("This check is no longer required.", show_alert=True)
+    bound_channel_data = await get_user_bound_channel(user_id)
+    if not bound_channel_data:
+        await callback.answer("Channel binding expired or not found. Please try again from the start link. 🔄", show_alert=True)
         return await callback.message.delete()
+    
+    force_join_channel_id = bound_channel_data['channel_id']
+    force_join_channel_title = bound_channel_data['full_name']
 
     try:
-        member = await bot.get_chat_member(FORCE_JOIN_CHANNEL_ID, user_id)
+        # Ensure the bot is still an admin in the bound channel
+        member_in_channel = await bot.get_chat_member(force_join_channel_id, bot.id)
+        if member_in_channel.status not in ['administrator', 'creator']:
+            await callback.answer("Bot is no longer an admin in the bound channel. Please try again. 🚧", show_alert=True)
+            return await callback.message.delete()
+            
+        member = await bot.get_chat_member(force_join_channel_id, user_id)
         if member.status not in ['left', 'kicked']:
             # User has joined
-            await callback.answer("Thank you for joining! Please wait...", show_alert=False)
+            await callback.answer(f"Thank you for joining {force_join_channel_title}! Please wait... 🙏", show_alert=False)
             await callback.message.delete()
             # We don't have the original user message ID, but it's not critical. Pass 0.
-            await proceed_with_verification(user_id, user_full_name, file_hash, 0)
+            await proceed_with_verification(user_id, user_full_name, file_hash, 0, download_filename_override)
         else:
             # User has not joined
-            await callback.answer("❌ You haven't joined the channel yet. Please join and then click the button again.", show_alert=True)
+            await callback.answer("❌ You haven't joined the channel yet. Please join and then click the button again. 🧐", show_alert=True)
     except Exception as e:
         logging.error(f"Error during join verification for user {user_id}: {e}")
-        await callback.answer("An error occurred. Please try again.", show_alert=True)
+        await callback.answer("An error occurred. Please try again. 🚧", show_alert=True)
 
 @dp.message(Command("ping"))
 async def ping_handler(message: Message):
