@@ -30,10 +30,8 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 ADS_BOT_ID = int(os.getenv("ADS_BOT_ID", 0)) # ID of the bot that posts ads
 # Channel Management Bot variables
 DESTINATION_CHANNEL_ID = int(os.getenv("DESTINATION_CHANNEL_ID", 0))
-# Dynamic Force Join Configuration
-# FORCE_JOIN_CHANNEL_ID and FORCE_JOIN_INVITE_LINK are removed.
-# The bot will dynamically select a channel from the 'channels' table.
-FORCE_JOIN_BINDING_DURATION_MINUTES = int(os.getenv("FORCE_JOIN_BINDING_DURATION_MINUTES", 30))
+# Force Join Configuration
+MAIN_CHANNEL_INVITE_LINK = os.getenv("MAIN_CHANNEL_INVITE_LINK") # Optional: for private main channel
 WEB_APP_DOMAIN = os.getenv("WEB_APP_DOMAIN", "http://localhost:8080").rstrip('/')
 PORT = int(os.getenv("PORT", 8080))
 
@@ -49,7 +47,6 @@ if DATABASE_URL:
             cursor.execute('''CREATE TABLE IF NOT EXISTS files (hash TEXT PRIMARY KEY, file_id TEXT, filename TEXT)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS ads (channel_id BIGINT, message_id BIGINT, url TEXT, timestamp REAL)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS requests (request_key TEXT PRIMARY KEY, verified INTEGER, timestamp REAL, target_url TEXT)''')
-            cursor.execute('''CREATE TABLE IF NOT EXISTS user_channel_bindings (user_id BIGINT PRIMARY KEY, channel_id BIGINT, bound_at REAL)''')
             
             cursor.execute('''CREATE TABLE IF NOT EXISTS channels (short_name TEXT PRIMARY KEY, channel_id BIGINT UNIQUE, full_name TEXT)''') # Ensure this is created
             # Statistics Tables
@@ -67,11 +64,6 @@ if DATABASE_URL:
             if not cursor.fetchone():
                 cursor.execute("ALTER TABLE files ADD COLUMN filename TEXT")
 
-            # Add bound_at column to user_channel_bindings if it doesn't exist
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='user_channel_bindings' AND column_name='bound_at'")
-            if not cursor.fetchone():
-                cursor.execute("ALTER TABLE user_channel_bindings ADD COLUMN bound_at REAL")
-            
             # Add download_filename column to requests table if it doesn't exist
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='requests' AND column_name='download_filename'")
             if not cursor.fetchone():
@@ -204,60 +196,6 @@ def extract_channel_short_name_from_filename(filename: str) -> Optional[str]:
             return match
             
     return None
-
-async def get_eligible_force_join_channels():
-    """
-    Retrieves a list of channels from the DB where the bot is an admin
-    and can be used for force join. Caches the result.
-    """
-    global ELIGIBLE_CHANNELS_CACHE
-
-    if time.time() - ELIGIBLE_CHANNELS_CACHE["timestamp"] < CACHE_DURATION:
-        return ELIGIBLE_CHANNELS_CACHE["channels"]
-
-    eligible_channels = []
-    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute("SELECT channel_id, short_name, full_name FROM channels")
-            all_channels = cursor.fetchall()
-
-            for channel_data in all_channels:
-                channel_id = channel_data['channel_id']
-                try:
-                    member = await bot.get_chat_member(channel_id, bot.id)
-                    # Bot must be an admin and have permission to invite users (or post messages for public channels)
-                    if isinstance(member, ChatMemberOwner) or \
-                       (isinstance(member, ChatMemberAdministrator) and (member.can_invite_users or member.can_post_messages)):
-                        eligible_channels.append(channel_data)
-                except TelegramNotFound:
-                    logging.warning(f"Channel {channel_id} not found during eligibility check. Removing from DB.")
-                    cursor.execute("DELETE FROM channels WHERE channel_id = %s", (channel_id,))
-                    conn.commit()
-                except Exception as e:
-                    logging.error(f"Error checking bot's status in channel {channel_id}: {e}")
-    
-    ELIGIBLE_CHANNELS_CACHE = {"channels": eligible_channels, "timestamp": time.time()}
-    return eligible_channels
-
-async def get_user_bound_channel(user_id: int) -> Optional[dict]:
-    """Retrieves the channel a user is bound to, if it's still active."""
-    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute("SELECT b.channel_id, b.bound_at, c.short_name, c.full_name FROM user_channel_bindings b JOIN channels c ON b.channel_id = c.channel_id WHERE b.user_id = %s", (user_id,))
-            binding = cursor.fetchone()
-            if binding and (time.time() - binding['bound_at']) < (FORCE_JOIN_BINDING_DURATION_MINUTES * 60):
-                return binding
-            # If expired or not found, clean up
-            cursor.execute("DELETE FROM user_channel_bindings WHERE user_id = %s", (user_id,))
-            conn.commit()
-            return None
-
-async def bind_user_to_channel(user_id: int, channel_id: int):
-    """Binds a user to a specific channel for force join."""
-    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
-        with conn.cursor() as cursor:
-            cursor.execute("INSERT INTO user_channel_bindings (user_id, channel_id, bound_at) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET channel_id = EXCLUDED.channel_id, bound_at = EXCLUDED.bound_at", (user_id, channel_id, time.time()))
-            conn.commit()
 
 @dp.message(Command("setchannel"), F.from_user.id == ADMIN_ID)
 async def set_channel_command(message: Message):
@@ -1032,39 +970,20 @@ async def handle_start(message: Message, command: CommandStart):
             if not cursor.fetchone():
                 return await message.answer("This file link is invalid or has expired.")
 
-    # 2. Dynamic Force Join Check
-    eligible_channels = await get_eligible_force_join_channels()
-    if eligible_channels:
+    # 2. Force Join Check
+    if DESTINATION_CHANNEL_ID:
         try:
-            bound_channel_data = await get_user_bound_channel(user_id)
-            if not bound_channel_data:
-                # No active binding, select a random channel
-                selected_channel = random.choice(eligible_channels)
-                await bind_user_to_channel(user_id, selected_channel['channel_id'])
-                bound_channel_data = selected_channel # Use the newly selected channel data
-            
-            force_join_channel_id = bound_channel_data['channel_id']
-            force_join_channel_title = bound_channel_data['full_name']
-
-            member = await bot.get_chat_member(force_join_channel_id, user_id)
+            member = await bot.get_chat_member(DESTINATION_CHANNEL_ID, user_id)
             if member.status in ['left', 'kicked']:
                 # User is not in the channel, ask them to join.
-                chat = await bot.get_chat(force_join_channel_id)
-                invite_link = chat.invite_link
+                chat = await bot.get_chat(DESTINATION_CHANNEL_ID)
+                invite_link = chat.invite_link or MAIN_CHANNEL_INVITE_LINK
                 
                 if not invite_link:
-                    # If no direct invite link, try to create one (bot must have can_invite_users)
-                    try:
-                        new_invite_link = await bot.create_chat_invite_link(force_join_channel_id, member_limit=1)
-                        invite_link = new_invite_link.invite_link
-                    except Exception as invite_e:
-                        logging.error(f"Could not create invite link for channel {force_join_channel_id}: {invite_e}")
-
-                if not invite_link: # Still no invite link
-                    logging.error(f"No invite link available for channel {force_join_channel_id}. Cannot enforce join.")
+                    logging.error(f"No invite link available for DESTINATION_CHANNEL_ID {DESTINATION_CHANNEL_ID}. Cannot enforce join. Please set MAIN_CHANNEL_INVITE_LINK for private channels.")
                 else:
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text=f"1. Join {force_join_channel_title} 🚀", url=invite_link)],
+                        [InlineKeyboardButton(text=f"1. Join {chat.title} 🚀", url=invite_link)],
                         [InlineKeyboardButton(text="2. ✅ I Have Joined", callback_data=f"verify_join_{file_hash}_{download_filename_override or ''}")]
                     ])
                     return await message.answer(
@@ -1073,7 +992,7 @@ async def handle_start(message: Message, command: CommandStart):
                         parse_mode=ParseMode.HTML
                     )
         except Exception as e:
-            logging.error(f"Could not check channel membership for user {user_id}. Error: {e}")
+            logging.error(f"Could not check channel membership for user {user_id} in channel {DESTINATION_CHANNEL_ID}. Error: {e}")
             # If check fails, proceed without verification to not block the user.
     # 3. Proceed to ad verification
     await proceed_with_verification(user_id, user_full_name, file_hash, message.message_id, download_filename_override)
@@ -1172,25 +1091,15 @@ async def handle_join_verification(callback: CallbackQuery):
     user_id = callback.from_user.id
     user_full_name = callback.from_user.full_name
 
-    bound_channel_data = await get_user_bound_channel(user_id)
-    if not bound_channel_data:
-        await callback.answer("Channel binding expired or not found. Please try again from the start link. 🔄", show_alert=True)
+    if not DESTINATION_CHANNEL_ID:
+        await callback.answer("This check is no longer required.", show_alert=True)
         return await callback.message.delete()
-    
-    force_join_channel_id = bound_channel_data['channel_id']
-    force_join_channel_title = bound_channel_data['full_name']
 
     try:
-        # Ensure the bot is still an admin in the bound channel
-        member_in_channel = await bot.get_chat_member(force_join_channel_id, bot.id)
-        if member_in_channel.status not in ['administrator', 'creator']:
-            await callback.answer("Bot is no longer an admin in the bound channel. Please try again. 🚧", show_alert=True)
-            return await callback.message.delete()
-            
-        member = await bot.get_chat_member(force_join_channel_id, user_id)
+        member = await bot.get_chat_member(DESTINATION_CHANNEL_ID, user_id)
         if member.status not in ['left', 'kicked']:
             # User has joined
-            await callback.answer(f"Thank you for joining {force_join_channel_title}! Please wait... 🙏", show_alert=False)
+            await callback.answer("Thank you for joining! Please wait... 🙏", show_alert=False)
             await callback.message.delete()
             # We don't have the original user message ID, but it's not critical. Pass 0.
             await proceed_with_verification(user_id, user_full_name, file_hash, 0, download_filename_override)
@@ -1199,7 +1108,7 @@ async def handle_join_verification(callback: CallbackQuery):
             await callback.answer("❌ You haven't joined the channel yet. Please join and then click the button again. 🧐", show_alert=True)
     except Exception as e:
         logging.error(f"Error during join verification for user {user_id}: {e}")
-        await callback.answer("An error occurred. Please try again. 🚧", show_alert=True)
+        await callback.answer("An error occurred while verifying. Please try again. 🚧", show_alert=True)
 
 @dp.message(Command("ping"))
 async def ping_handler(message: Message):
