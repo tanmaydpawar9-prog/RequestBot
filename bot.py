@@ -949,8 +949,10 @@ async def proceed_with_verification(chat_id: int, user_full_name: str, file_hash
 @dp.message(CommandStart())
 async def handle_start(message: Message, command: CommandStart):
     """Handles the user clicking the deep link."""
-    file_hash = command.args
-    download_filename_override = None
+    raw_args = command.args # Store original args
+    file_hash = raw_args
+    download_filename_override_decoded = None
+    download_filename_override_encoded = None # To store the encoded version for callback_data
     user_id = message.from_user.id
     user_full_name = message.from_user.full_name
 
@@ -963,9 +965,9 @@ async def handle_start(message: Message, command: CommandStart):
         )
 
     # Check if a custom filename was provided in the deep link
-    if '_' in file_hash:
-        file_hash, download_filename_override = file_hash.split('_', 1)
-        download_filename_override = download_filename_override.replace("%20", " ") # Decode spaces
+    if '_' in raw_args:
+        file_hash, download_filename_override_encoded = raw_args.split('_', 1)
+        download_filename_override_decoded = unquote(download_filename_override_encoded) # Decode URL-encoded filename
 
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
@@ -985,9 +987,11 @@ async def handle_start(message: Message, command: CommandStart):
                 if not invite_link:
                     logging.error(f"No invite link available for DESTINATION_CHANNEL_ID {DESTINATION_CHANNEL_ID}. Cannot enforce join. Please set MAIN_CHANNEL_INVITE_LINK for private channels.")
                 else:
+                    # Use the *encoded* filename for the callback data to prevent issues with splitting
+                    callback_data_filename_part = download_filename_override_encoded if download_filename_override_encoded else ''
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text=f"1. Join {chat.title} 🚀", url=invite_link)],
-                        [InlineKeyboardButton(text="2. ✅ I Have Joined", callback_data=f"verify_join_{file_hash}_{download_filename_override or ''}")]
+                        [InlineKeyboardButton(text="2. ✅ I Have Joined", callback_data=f"verify_join_{file_hash}_{callback_data_filename_part}")]
                     ])
                     return await message.answer(
                         "<b>Join Required!</b>\n\nTo get your file, you must first join our channel. 👇",
@@ -997,8 +1001,8 @@ async def handle_start(message: Message, command: CommandStart):
         except Exception as e:
             logging.error(f"Could not check channel membership for user {user_id} in channel {DESTINATION_CHANNEL_ID}. Error: {e}")
             # If check fails, proceed without verification to not block the user.
-    # 3. Proceed to ad verification
-    await proceed_with_verification(user_id, user_full_name, file_hash, message.message_id, download_filename_override)
+    # 3. Proceed to ad verification with the *decoded* filename
+    await proceed_with_verification(user_id, user_full_name, file_hash, message.message_id, download_filename_override_decoded)
 
 @dp.callback_query(F.data.startswith("get_"))
 async def serve_file(callback: CallbackQuery):
@@ -1091,6 +1095,8 @@ async def handle_join_verification(callback: CallbackQuery):
     file_hash = parts[2]
     download_filename_override = parts[3] if len(parts) > 3 else None
 
+    if download_filename_override:
+        download_filename_override = unquote(download_filename_override) # Decode URL-encoded filename from callback data
     user_id = callback.from_user.id
     user_full_name = callback.from_user.full_name
 
