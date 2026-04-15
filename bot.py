@@ -699,7 +699,21 @@ async def post_forwarded_message(message: Message):
 
     # 4. Send the new message
     try:
-        await bot.send_photo(chat_id=DESTINATION_CHANNEL_ID, photo=photo_file_id, caption=forwarded_message.caption, caption_entities=forwarded_message.caption_entities, reply_markup=keyboard)
+        # Use copy_message for a perfect clone, then edit to add the button.
+        # This is the most reliable way to preserve all formatting (including quotes) and media.
+        copied_message = await bot.copy_message(
+            chat_id=DESTINATION_CHANNEL_ID,
+            from_chat_id=forwarded_message.chat.id,
+            message_id=forwarded_message.message_id
+        )
+
+        # Now, edit the copied message to add our custom inline button
+        await bot.edit_message_reply_markup(
+            chat_id=DESTINATION_CHANNEL_ID,
+            message_id=copied_message.message_id,
+            reply_markup=keyboard
+        )
+
         await message.reply(f"✅ Successfully posted to channel <code>{DESTINATION_CHANNEL_ID}</code>.", parse_mode=ParseMode.HTML)
         logging.info(f"Admin {message.from_user.id} successfully posted message {forwarded_message.forward_from_message_id} to channel {DESTINATION_CHANNEL_ID}.")
     except TelegramBadRequest as e:
