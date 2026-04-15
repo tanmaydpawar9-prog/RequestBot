@@ -26,6 +26,7 @@ load_dotenv()
 # --- Configuration & Environment Variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+ADS_BOT_ID = int(os.getenv("ADS_BOT_ID", 0)) # ID of the bot that posts ads
 WEB_APP_DOMAIN = os.getenv("WEB_APP_DOMAIN", "http://localhost:8080").rstrip('/')
 PORT = int(os.getenv("PORT", 8080))
 
@@ -597,15 +598,19 @@ async def handle_unauthorized_upload(message: Message):
 @dp.channel_post()
 async def track_channel_ads(message: Message):
     """Monitors any channel the bot is in to automatically log ads."""
+    # Only track messages sent by the designated ads bot.
+    if not ADS_BOT_ID or not message.via_bot or message.via_bot.id != ADS_BOT_ID:
+        return
+
     ad_url = extract_ad_url(message)
     if ad_url:
         with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT 1 FROM ads WHERE message_id = %s", (message.message_id,))
                 if not cursor.fetchone():
-                    cursor.execute("INSERT INTO ads (channel_id, message_id, url, timestamp) VALUES (%s, %s, %s, %s)", 
+                    cursor.execute("INSERT INTO ads (channel_id, message_id, url, timestamp) VALUES (%s, %s, %s, %s)",
                                    (message.chat.id, message.message_id, ad_url, time.time()))
-                    logging.info(f"New ad registered automatically: {ad_url}")
+                    logging.info(f"New ad registered automatically from Ads Bot: {ad_url}")
 
 @dp.message(F.from_user.id == ADMIN_ID, F.forward_from_chat, F.forward_from_chat.type == 'channel')
 async def register_previous_ad(message: Message):
