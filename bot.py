@@ -41,7 +41,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL:
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
-            cursor.execute('''CREATE TABLE IF NOT EXISTS files (hash TEXT PRIMARY KEY, file_id TEXT)''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS files (hash TEXT PRIMARY KEY, file_id TEXT, filename TEXT)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS ads (channel_id BIGINT, message_id BIGINT, url TEXT, timestamp REAL)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS requests (request_key TEXT PRIMARY KEY, verified INTEGER, timestamp REAL, target_url TEXT)''')
             
@@ -55,6 +55,11 @@ if DATABASE_URL:
                 cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name='requests' AND column_name='{col}'")
                 if not cursor.fetchone():
                     cursor.execute(f"ALTER TABLE requests ADD COLUMN {col} BIGINT")
+            
+            # Add filename column to files table if it doesn't exist
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='files' AND column_name='filename'")
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE files ADD COLUMN filename TEXT")
             
             # Commit any schema changes
             conn.commit()
@@ -278,56 +283,53 @@ async def view_stats(message: Message):
 
             success_rate = (tot_succ / tot_req * 100) if tot_req > 0 else 0
 
-            cursor.execute("SELECT user_id, name, total_requests, successful_receives FROM users ORDER BY successful_receives DESC")
+            cursor.execute("SELECT user_id, name, total_requests, successful_receives FROM users ORDER BY successful_receives DESC, total_requests DESC")
             users = cursor.fetchall()
             user_count = len(users)
 
             lines = [
-                "╔═══════════════════════════╗",
-                "║   📊  <b>FRICTION  STATS</b>   ║",
-                "╚═══════════════════════════╝",
+                "📊 <b>Bot Statistics</b>",
                 "",
-                "🌐  <b>GLOBAL OVERVIEW</b>",
-                "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈",
-                f"  🔗  Links Clicked   →  <b>{tot_req}</b>",
-                f"  📥  Files Received  →  <b>{tot_succ}</b>",
-                f"  📈  Success Rate    →  <b>{success_rate:.1f}%</b>",
-                "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈",
+                "<b>Global Overview</b>",
+                f"• Clicks: <b>{tot_req}</b>",
+                f"• Files Received: <b>{tot_succ}</b>",
+                f"• Success Rate: <b>{success_rate:.1f}%</b>",
+                f"• Total Users: <b>{user_count}</b>",
                 "",
-                f"👥  <b>USER BREAKDOWN</b>  ·  {user_count} user{'s' if user_count != 1 else ''}",
-                "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈",
+                "---",
+                "",
+                f"👥 <b>Top Users</b> ({min(len(users), 10)} shown)",
             ]
 
-            for i, row in enumerate(users, 1):
+            for i, row in enumerate(users[:10], 1): # Limit to top 10 users
                 uid = row['user_id']
                 name = row['name'] or "Unknown"
-                medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, "👤")
+                medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"<b>#{i}</b>")
 
-                cursor.execute(
-                    "SELECT file_hash, count FROM user_file_requests WHERE user_id = %s ORDER BY count DESC",
-                    (uid,)
-                )
+                cursor.execute("""
+                    SELECT f.filename, ufr.count 
+                    FROM user_file_requests ufr
+                    JOIN files f ON ufr.file_hash = f.hash
+                    WHERE ufr.user_id = %s AND f.filename IS NOT NULL
+                    ORDER BY ufr.count DESC
+                """, (uid,))
                 file_rows = cursor.fetchall()
 
                 lines.append("")
-                lines.append(f"{medal}  <b>#{i} · {name}</b>")
-                lines.append(f"      🆔  <code>{uid}</code>")
-                lines.append(f"      🔗  Clicks: <b>{row['total_requests']}</b>   📥  Received: <b>{row['successful_receives']}</b>")
+                lines.append(f"{medal} <b>{name}</b> (<code>{uid}</code>)")
+                lines.append(f"    - Clicks: <b>{row['total_requests']}</b> | Received: <b>{row['successful_receives']}</b>")
 
                 if file_rows:
-                    lines.append("      📁  <i>File history:</i>")
-                    for j, f_row in enumerate(file_rows):
-                        connector = "└" if j == len(file_rows) - 1 else "├"
-                        lines.append(f"         {connector} <code>{f_row['file_hash']}</code>  ×{f_row['count']}")
-
-            ts = time.strftime("%d %b %Y · %H:%M UTC", time.gmtime())
-            lines.append("")
-            lines.append("┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈")
-            lines.append(f"🕐  <i>{ts}</i>")
+                    file_stats = {} # Aggregate counts per short_name
+                    for f_row in file_rows:
+                        short_name = extract_channel_short_name_from_filename(f_row['filename']) or "N/A"
+                        file_stats[short_name] = file_stats.get(short_name, 0) + f_row['count']
+                    
+                    sorted_files = sorted(file_stats.items(), key=lambda item: item[1], reverse=True)
+                    files_str = ", ".join([f"<code>{name}</code> (x{count})" for name, count in sorted_files])
+                    lines.append(f"    - Files: {files_str}")
 
     text = "\n".join(lines)
-    if len(text) > 4000:
-        text = text[:4000] + "\n<i>... (truncated)</i>"
     await message.answer(text)
 
 @dp.message(Command("getdata"), F.from_user.id == ADMIN_ID)
@@ -516,7 +518,7 @@ async def handle_admin_upload(message: Message):
 
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
-            cursor.execute("INSERT INTO files (hash, file_id) VALUES (%s, %s)", (file_hash, file_id))
+            cursor.execute("INSERT INTO files (hash, file_id, filename) VALUES (%s, %s, %s)", (file_hash, file_id, original_filename))
     
     # --- NEW LOGIC: Try to auto-detect channel from filename ---
     short_name_from_filename = extract_channel_short_name_from_filename(original_filename)
