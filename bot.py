@@ -27,6 +27,8 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 ADS_BOT_ID = int(os.getenv("ADS_BOT_ID", 0)) # ID of the bot that posts ads
+# Channel Management Bot variables
+DESTINATION_CHANNEL_ID = int(os.getenv("DESTINATION_CHANNEL_ID", 0))
 WEB_APP_DOMAIN = os.getenv("WEB_APP_DOMAIN", "http://localhost:8080").rstrip('/')
 PORT = int(os.getenv("PORT", 8080))
 
@@ -594,6 +596,55 @@ async def handle_unauthorized_upload(message: Message):
         f"Bot's configured ADMIN_ID: <code>{ADMIN_ID}</code>\n\n"
         f"If these numbers don't match, you must update the ADMIN_ID variable in your Render dashboard!"
     )
+
+@dp.message(Command("post"), F.from_user.id == ADMIN_ID, F.reply_to_message)
+async def post_forwarded_message(message: Message):
+    """
+    Admin command to re-post a forwarded message to the destination channel.
+    The admin must reply to the forwarded message with /post.
+    """
+    # The message to be posted is the one being replied to
+    forwarded_message = message.reply_to_message
+
+    # --- Validations ---
+    if not forwarded_message.forward_from_chat:
+        return await message.reply("❌ This command only works when replying to a forwarded message from a channel.")
+
+    if not forwarded_message.photo or not forwarded_message.caption:
+        return await message.reply("❌ The forwarded message must contain a photo and a caption.")
+
+    if not DESTINATION_CHANNEL_ID:
+        return await message.reply("⚠️ The `DESTINATION_CHANNEL_ID` is not set. Please configure it in your environment variables.")
+
+    # --- Logic from the old handler, adapted ---
+    photo_file_id = forwarded_message.photo[-1].file_id
+
+    # 1. Extract Episode Number (e.g., "EP12" or "S01E02")
+    episode_match = re.search(r'\b(EP\d+|S\d+E\d+)\b', forwarded_message.caption, re.IGNORECASE)
+    if not episode_match:
+        return await message.reply(f"❌ No episode pattern (e.g., EP123 or S01E02) found in the caption. Cannot create button.")
+    
+    episode_info = episode_match.group(0).upper()
+
+    # 2. Get original post link
+    original_chat = forwarded_message.forward_from_chat
+    if not original_chat.username:
+        return await message.reply(f"❌ The source channel (<code>{original_chat.id}</code>) must be public and have a username to create a post link.", parse_mode=ParseMode.HTML)
+        
+    original_post_link = f"https://t.me/{original_chat.username}/{forwarded_message.forward_from_message_id}"
+
+    # 3. Construct the inline button
+    button_text = f"{episode_info} | Download Here"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=button_text, url=original_post_link)]])
+
+    # 4. Send the new message
+    try:
+        await bot.send_photo(chat_id=DESTINATION_CHANNEL_ID, photo=photo_file_id, caption=forwarded_message.caption, caption_entities=forwarded_message.caption_entities, reply_markup=keyboard)
+        await message.reply(f"✅ Successfully posted to channel <code>{DESTINATION_CHANNEL_ID}</code>.", parse_mode=ParseMode.HTML)
+        logging.info(f"Admin {message.from_user.id} successfully posted message {forwarded_message.forward_from_message_id} to channel {DESTINATION_CHANNEL_ID}.")
+    except Exception as e:
+        logging.error(f"Failed to post forwarded message for admin. Error: {e}")
+        await message.reply(f"🚨 <b>Posting Failed!</b>\n\nCould not send the post to the destination channel (ID: <code>{DESTINATION_CHANNEL_ID}</code>).\n\n<b>Error:</b>\n<code>{e}</code>\n\nMake sure the bot is an admin in the destination channel with permission to post photos.", parse_mode=ParseMode.HTML)
 
 @dp.channel_post()
 async def track_channel_ads(message: Message):
