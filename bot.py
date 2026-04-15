@@ -1119,6 +1119,76 @@ async def handle_join_verification(callback: CallbackQuery):
         logging.error(f"Error during join verification for user {user_id}: {e}")
         await callback.answer("An error occurred while verifying. Please try again. 🚧", show_alert=True)
 
+@dp.callback_query(F.data.startswith("verify_post_join_"))
+async def handle_post_join_verification(callback: CallbackQuery):
+    """
+    Handles the initial click on a /post button. Checks for channel join.
+    """
+    parts = callback.data.split("_", 3) # verify_post_join_CHANNELUSERNAME_MESSAGEID
+    if len(parts) < 4:
+        return await callback.answer("Invalid callback data.", show_alert=True)
+
+    channel_username = parts[2]
+    message_id = parts[3]
+    user_id = callback.from_user.id
+
+    if not DESTINATION_CHANNEL_ID:
+        # If no force join channel is configured, just redirect directly
+        original_post_link = f"https://t.me/{channel_username}/{message_id}"
+        await callback.answer("Redirecting to post...", show_alert=False)
+        # Edit the message to provide the direct link
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬇️ Download Here", url=original_post_link)]
+        ])
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        return
+
+    try:
+        member = await bot.get_chat_member(DESTINATION_CHANNEL_ID, user_id)
+        if member.status not in ['left', 'kicked']:
+            # User has joined, redirect them to the original post
+            original_post_link = f"https://t.me/{channel_username}/{message_id}"
+            await callback.answer("Redirecting to post...", show_alert=False)
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬇️ Download Here", url=original_post_link)]
+            ])
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
+        else:
+            # User has not joined, prompt them to join
+            chat = await bot.get_chat(DESTINATION_CHANNEL_ID)
+            invite_link = chat.invite_link or MAIN_CHANNEL_INVITE_LINK
+            
+            if not invite_link:
+                logging.error(f"No invite link available for DESTINATION_CHANNEL_ID {DESTINATION_CHANNEL_ID}. Cannot enforce join for /post.")
+                return await callback.answer("Channel join verification is currently unavailable. Please try again later.", show_alert=True)
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"1. Join {chat.title} 🚀", url=invite_link)],
+                [InlineKeyboardButton(text="2. ✅ I Have Joined", callback_data=f"confirm_post_join_{channel_username}_{message_id}")]
+            ])
+            await callback.message.edit_text(
+                "<b>Join Required!</b>\n\nTo access this post, you must first join our channel. 👇",
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+            await callback.answer("Please join the channel first.", show_alert=True)
+    except Exception as e:
+        logging.error(f"Error during /post join verification for user {user_id}: {e}")
+        await callback.answer("An error occurred while verifying. Please try again. 🚧", show_alert=True)
+
+@dp.callback_query(F.data.startswith("confirm_post_join_"))
+async def handle_confirm_post_join(callback: CallbackQuery):
+    """Handles the 'I Have Joined' button click after a /post verification."""
+    parts = callback.data.split("_", 3)
+    channel_username = parts[2]
+    message_id = parts[3]
+    user_id = callback.from_user.id
+
+    # Re-use the logic from handle_post_join_verification
+    # This will either redirect or re-prompt if not joined
+    await handle_post_join_verification(callback)
+
+
 @dp.message(Command("ping"))
 async def ping_handler(message: Message):
     """Simple command to test if the bot is alive."""
@@ -1143,7 +1213,6 @@ async def track_click(request: web.Request):
     user_id = request.query.get("u")
     file_hash = request.query.get("h")
     
-    target_url = "https://example.com"
     
     if user_id and file_hash:
         request_key = f"{user_id}_{file_hash}"
@@ -1152,8 +1221,9 @@ async def track_click(request: web.Request):
                 cursor.execute("SELECT target_url FROM requests WHERE request_key = %s", (request_key,))
                 req = cursor.fetchone()
                 if req:
+                    # Use the stored target_url, or fallback to a default if it's None
+                    target_url = req['target_url'] if req['target_url'] else target_url
                     cursor.execute("UPDATE requests SET verified = 1 WHERE request_key = %s", (request_key,))
-                    target_url = req['target_url']
                     conn.commit() # Commit verification update
                     logging.info(f"User {user_id} verified for file {file_hash}")
             
