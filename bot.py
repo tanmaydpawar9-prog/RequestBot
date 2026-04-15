@@ -276,42 +276,45 @@ async def post_to_channel_callback(callback: CallbackQuery):
 
 @dp.message(Command("stats"), F.from_user.id == ADMIN_ID)
 async def view_stats(message: Message):
-    """Admin command to view user request statistics."""
+    """Admin command to view user request statistics in a clean table format."""
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute("SELECT SUM(total_requests), SUM(successful_receives) FROM users")
             totals = cursor.fetchone()
             tot_req = totals[0] or 0
             tot_succ = totals[1] or 0
-
+ 
             if tot_req == 0:
                 return await message.answer("📊 No file requests have been made yet.")
-
+ 
             success_rate = (tot_succ / tot_req * 100) if tot_req > 0 else 0
-
+ 
             cursor.execute("SELECT user_id, name, total_requests, successful_receives FROM users ORDER BY successful_receives DESC, total_requests DESC")
             users = cursor.fetchall()
             user_count = len(users)
-
+ 
+            # --- Build the table inside a <code> block ---
             lines = [
-                "📊 <b>Bot Statistics</b>",
+                "📊 Bot Statistics",
+                "---------------------------------",
+                "Global:",
+                f"  - {'Clicks:':<17}{tot_req}",
+                f"  - {'Files Received:':<17}{tot_succ}",
+                f"  - {'Success Rate:':<17}{success_rate:.1f}%",
+                f"  - {'Total Users:':<17}{user_count}",
                 "",
-                "<b>Global Overview</b>",
-                f"• Clicks: <b>{tot_req}</b>",
-                f"• Files Received: <b>{tot_succ}</b>",
-                f"• Success Rate: <b>{success_rate:.1f}%</b>",
-                f"• Total Users: <b>{user_count}</b>",
-                "",
-                "---",
-                "",
-                f"👥 <b>Top Users</b> ({min(len(users), 10)} shown)",
+                f"👥 Top {min(len(users), 10)} Users:",
+                "---------------------------------"
             ]
-
+ 
+            if not users:
+                lines.append("No user data available yet.")
+            
             for i, row in enumerate(users[:10], 1): # Limit to top 10 users
                 uid = row['user_id']
-                name = row['name'] or "Unknown"
-                medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"<b>#{i}</b>")
-
+                name = (row['name'] or "Unknown").strip()
+                medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"#{i}")
+ 
                 cursor.execute("""
                     SELECT f.filename, ufr.count 
                     FROM user_file_requests ufr
@@ -320,11 +323,12 @@ async def view_stats(message: Message):
                     ORDER BY ufr.count DESC
                 """, (uid,))
                 file_rows = cursor.fetchall()
-
-                lines.append("")
-                lines.append(f"{medal} <b>{name}</b> (<code>{uid}</code>)")
-                lines.append(f"    - Clicks: <b>{row['total_requests']}</b> | Received: <b>{row['successful_receives']}</b>")
-
+ 
+                lines.append(f"{medal} {name}")
+                lines.append(f"   - {'ID:':<11}{uid}")
+                lines.append(f"   - {'Clicks:':<11}{row['total_requests']}")
+                lines.append(f"   - {'Received:':<11}{row['successful_receives']}")
+ 
                 if file_rows:
                     file_stats = {} # Aggregate counts per short_name
                     for f_row in file_rows:
@@ -332,11 +336,18 @@ async def view_stats(message: Message):
                         file_stats[short_name] = file_stats.get(short_name, 0) + f_row['count']
                     
                     sorted_files = sorted(file_stats.items(), key=lambda item: item[1], reverse=True)
-                    files_str = ", ".join([f"<code>{name}</code> (x{count})" for name, count in sorted_files])
-                    lines.append(f"    - Files: {files_str}")
-
+                    files_str = ", ".join([f"{name}(x{count})" for name, count in sorted_files])
+                    lines.append(f"   - {'Files:':<11}{files_str}")
+                lines.append("") # Add a blank line for spacing
+ 
+    # Remove the last blank line
+    if lines and lines[-1] == "":
+        lines.pop()
+ 
     text = "\n".join(lines)
-    await message.answer(text)
+    # Sanitize for HTML before putting in <code>
+    text = text.replace('<', '&lt;').replace('>', '&gt;')
+    await message.answer(f"<code>{text}</code>", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("getdata"), F.from_user.id == ADMIN_ID)
 async def get_data_pdf(message: Message):
@@ -871,8 +882,16 @@ async def ping_handler(message: Message):
 
 @dp.message()
 async def catch_all(message: Message):
-    """Catches all other messages to let you know the bot is alive but confused."""
-    await message.answer(f"🤖 I am alive! But I only understand Subtitle Files.\n\nPlease make sure you are sending your subtitle as an attached <b>Document/File</b>.\nYour ID: <code>{message.from_user.id}</code>")
+    """Catches unhandled messages and provides helpful feedback, especially to the admin."""
+    if message.from_user.id == ADMIN_ID and message.chat.type == 'private':
+        if message.text:
+            if message.text.startswith('/post'):
+                return await message.reply("⚠️ **Command Error:**\nTo use `/post`, you must **reply** to a forwarded message that contains a photo and caption.")
+            if message.text.startswith('/addad'):
+                return await message.reply("⚠️ **Command Error:**\nTo use `/addad`, you must **reply** to a forwarded ad message.")
+        # For other admin messages that are not handled, we can stay silent to avoid noise.
+        return
+    # For non-admins, we can also choose to be silent to prevent the bot from being chatty in groups or with random users.
 
 # --- Web Server for Tracking Clicks ---
 async def track_click(request: web.Request):
