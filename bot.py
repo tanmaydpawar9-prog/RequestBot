@@ -639,13 +639,12 @@ async def handle_admin_upload(message: Message):
 
 @dp.message(F.document)
 async def handle_unauthorized_upload(message: Message):
-    """Catches document uploads from non-admins for debugging."""
+    """Catches document uploads from non-admins and sends a generic denial message."""
     await message.answer(
-        f"❌ <b>Unauthorized or ID Mismatch!</b>\n\n"
-        f"Your Telegram ID: <code>{message.from_user.id}</code>\n"
-        f"Bot's configured ADMIN_ID: <code>{ADMIN_ID}</code>\n\n"
-        f"If these numbers don't match, you must update the ADMIN_ID variable in your Render dashboard!"
-    , parse_mode=ParseMode.HTML)
+        "🚫 <b>Access Denied</b>\n\n"
+        "You are not authorized to upload files. This is a private bot and file uploads are restricted to the administrator.",
+        parse_mode=ParseMode.HTML
+    )
 
 @dp.message(Command("check_dest"), F.from_user.id == ADMIN_ID)
 async def check_destination_channel(message: Message):
@@ -957,7 +956,11 @@ async def handle_start(message: Message, command: CommandStart):
 
     # 1. Initial validation
     if not file_hash:
-        return await message.answer("Welcome! Please use a valid file request link.")
+        return await message.answer(
+            "👋 <b>Welcome to the File Request Bot!</b>\n\n"
+            "To get a file, you need to use a special link from one of our channels. This bot doesn't support direct file searches or other commands.",
+            parse_mode=ParseMode.HTML
+        )
 
     # Check if a custom filename was provided in the deep link
     if '_' in file_hash:
