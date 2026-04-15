@@ -64,11 +64,6 @@ if DATABASE_URL:
             if not cursor.fetchone():
                 cursor.execute("ALTER TABLE files ADD COLUMN filename TEXT")
 
-            # Add download_filename column to requests table if it doesn't exist
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='requests' AND column_name='download_filename'")
-            if not cursor.fetchone():
-                cursor.execute("ALTER TABLE requests ADD COLUMN download_filename TEXT")
-
             # Commit any schema changes
             conn.commit()
 else:
@@ -270,8 +265,10 @@ async def post_to_channel_callback(callback: CallbackQuery):
             file_extension = os.path.splitext(original_filename)[1] or ".ass" # Default to .ass
             download_filename = f"[ENG] {short_name} {episode_info} @{bot_info.username}{file_extension}".strip().replace("  ", " ")
 
-            # Update the deep link to include the desired filename
-            deep_link = f"https://t.me/{bot_info.username}?start={file_hash}_{download_filename}"
+            # Update the filename in the DB and create a clean link
+            cursor.execute("UPDATE files SET filename = %s WHERE hash = %s", (download_filename, file_hash))
+            conn.commit()
+            deep_link = f"https://t.me/{bot_info.username}?start={file_hash}"
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⬇️ Download Subtitle", url=deep_link)]
@@ -584,7 +581,10 @@ async def handle_admin_upload(message: Message):
                     file_extension = os.path.splitext(original_filename)[1] or ".ass" # Default to .ass
                     download_filename = f"[ENG] {short_name_from_filename} {episode_info} @{bot_info.username}{file_extension}".strip().replace("  ", " ")
 
-                    deep_link = f"https://t.me/{bot_info.username}?start={file_hash}_{download_filename}"
+                    # Update the filename in the DB and create a clean link
+                    cursor.execute("UPDATE files SET filename = %s WHERE hash = %s", (download_filename, file_hash))
+                    conn.commit()
+                    deep_link = f"https://t.me/{bot_info.username}?start={file_hash}"
                     
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="⬇️ Download Subtitle", url=deep_link)]
@@ -851,7 +851,7 @@ async def register_previous_ad_command(message: Message):
     else:
         await message.reply("❌ No URL found in the replied message. Is this an ad?")
 
-async def proceed_with_verification(chat_id: int, user_full_name: str, file_hash: str, user_msg_id: int, download_filename_override: Optional[str] = None):
+async def proceed_with_verification(chat_id: int, user_full_name: str, file_hash: str, user_msg_id: int):
     """Handles the ad forwarding and verification message sending."""
     request_key = f"{chat_id}_{file_hash}"
     
@@ -938,10 +938,10 @@ async def proceed_with_verification(chat_id: int, user_full_name: str, file_hash
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
-                INSERT INTO requests (request_key, verified, timestamp, target_url, user_msg_id, bot_fwd_msg_id, bot_reply_msg_id, download_filename) 
-                VALUES (%s, 0, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT(request_key) DO UPDATE SET verified = 0, timestamp = EXCLUDED.timestamp, target_url = EXCLUDED.target_url, user_msg_id = EXCLUDED.user_msg_id, bot_fwd_msg_id = EXCLUDED.bot_fwd_msg_id, bot_reply_msg_id = EXCLUDED.bot_reply_msg_id, download_filename = EXCLUDED.download_filename
-            """, (request_key, time.time(), ad_url, user_msg_id, fwd_msg_id, bot_reply_msg_id, download_filename_override))
+                INSERT INTO requests (request_key, verified, timestamp, target_url, user_msg_id, bot_fwd_msg_id, bot_reply_msg_id) 
+                VALUES (%s, 0, %s, %s, %s, %s, %s)
+                ON CONFLICT(request_key) DO UPDATE SET verified = 0, timestamp = EXCLUDED.timestamp, target_url = EXCLUDED.target_url, user_msg_id = EXCLUDED.user_msg_id, bot_fwd_msg_id = EXCLUDED.bot_fwd_msg_id, bot_reply_msg_id = EXCLUDED.bot_reply_msg_id
+            """, (request_key, time.time(), ad_url, user_msg_id, fwd_msg_id, bot_reply_msg_id))
     
     # Schedule cleanup if user doesn't interact
     asyncio.create_task(cleanup_unclicked_request(request_key, chat_id, delay=300))
@@ -951,8 +951,6 @@ async def handle_start(message: Message, command: CommandStart):
     """Handles the user clicking the deep link."""
     raw_args = command.args # Store original args
     file_hash = raw_args
-    download_filename_override_decoded = None
-    download_filename_override_encoded = None # To store the encoded version for callback_data
     user_id = message.from_user.id
     user_full_name = message.from_user.full_name
 
@@ -963,11 +961,6 @@ async def handle_start(message: Message, command: CommandStart):
             "To get a file, you need to use a special link from one of our channels. This bot doesn't support direct file searches or other commands.",
             parse_mode=ParseMode.HTML
         )
-
-    # Check if a custom filename was provided in the deep link
-    if '_' in raw_args:
-        file_hash, download_filename_override_encoded = raw_args.split('_', 1)
-        download_filename_override_decoded = unquote(download_filename_override_encoded) # Decode URL-encoded filename
 
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
@@ -987,11 +980,9 @@ async def handle_start(message: Message, command: CommandStart):
                 if not invite_link:
                     logging.error(f"No invite link available for DESTINATION_CHANNEL_ID {DESTINATION_CHANNEL_ID}. Cannot enforce join. Please set MAIN_CHANNEL_INVITE_LINK for private channels.")
                 else:
-                    # Use the *encoded* filename for the callback data to prevent issues with splitting
-                    callback_data_filename_part = download_filename_override_encoded if download_filename_override_encoded else ''
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text=f"1. Join {chat.title} 🚀", url=invite_link)],
-                        [InlineKeyboardButton(text="2. ✅ I Have Joined", callback_data=f"verify_join_{file_hash}_{callback_data_filename_part}")]
+                        [InlineKeyboardButton(text="2. ✅ I Have Joined", callback_data=f"verify_join_{file_hash}")]
                     ])
                     return await message.answer(
                         "<b>Join Required!</b>\n\nTo get your file, you must first join our channel. 👇",
@@ -1001,8 +992,8 @@ async def handle_start(message: Message, command: CommandStart):
         except Exception as e:
             logging.error(f"Could not check channel membership for user {user_id} in channel {DESTINATION_CHANNEL_ID}. Error: {e}")
             # If check fails, proceed without verification to not block the user.
-    # 3. Proceed to ad verification with the *decoded* filename
-    await proceed_with_verification(user_id, user_full_name, file_hash, message.message_id, download_filename_override_decoded)
+    # 3. Proceed to ad verification
+    await proceed_with_verification(user_id, user_full_name, file_hash, message.message_id)
 
 @dp.callback_query(F.data.startswith("get_"))
 async def serve_file(callback: CallbackQuery):
@@ -1018,7 +1009,7 @@ async def serve_file(callback: CallbackQuery):
     bot_reply_msg_id = None
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute("SELECT verified, timestamp, user_msg_id, bot_fwd_msg_id, bot_reply_msg_id, download_filename FROM requests WHERE request_key = %s", (request_key,))
+            cursor.execute("SELECT verified, timestamp, user_msg_id, bot_fwd_msg_id, bot_reply_msg_id FROM requests WHERE request_key = %s", (request_key,))
             req = cursor.fetchone()
             
             if not req:
@@ -1034,19 +1025,17 @@ async def serve_file(callback: CallbackQuery):
             user_msg_id = req.get('user_msg_id')
             bot_fwd_msg_id = req.get('bot_fwd_msg_id')
             bot_reply_msg_id = req.get('bot_reply_msg_id') # Now this will be fetched correctly
-            download_filename = req.get('download_filename')
 
             cursor.execute("SELECT file_id, filename FROM files WHERE hash = %s", (file_hash,))
             file_row = cursor.fetchone()
             if file_row: # type: ignore
+                file_id = file_row['file_id']
+                download_filename = file_row['filename']
                 cursor.execute("UPDATE users SET successful_receives = successful_receives + 1 WHERE user_id = %s", (user_id,))
                 cursor.execute("""
                     INSERT INTO user_file_requests (user_id, file_hash, count) VALUES (%s, %s, 1)
                     ON CONFLICT(user_id, file_hash) DO UPDATE SET count = user_file_requests.count + 1
                 """, (user_id, file_hash))
-                file_id = file_row[0]
-                if not download_filename:
-                    download_filename = file_row[1]
                 
             cursor.execute("DELETE FROM requests WHERE request_key = %s", (request_key,))
             
@@ -1093,9 +1082,7 @@ async def handle_join_verification(callback: CallbackQuery):
     """Handles the 'I have joined' button click."""
     # Split into 'verify', 'join', HASH
     parts = callback.data.split("_")
-    file_hash = parts[2]
-    # download_filename_override is no longer passed via callback data
-    download_filename_override = None
+    file_hash = parts[2] # type: ignore
     user_id = callback.from_user.id
     user_full_name = callback.from_user.full_name
 
