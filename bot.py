@@ -521,7 +521,8 @@ async def get_data_pdf(message: Message):
     await bot.send_document(
         message.chat.id,
         BufferedInputFile(buffer.read(), filename=f"frictionrealm_stats_{ts_file}.pdf"),
-        caption=f"📊 <b>TheFrictionRealm Stats</b>\n<i>{ts_display}</i>"
+        caption=f"📊 <b>TheFrictionRealm Stats</b>\n<i>{ts_display}</i>",
+        parse_mode=ParseMode.HTML
     )
 
 
@@ -614,7 +615,7 @@ async def handle_unauthorized_upload(message: Message):
         f"Your Telegram ID: <code>{message.from_user.id}</code>\n"
         f"Bot's configured ADMIN_ID: <code>{ADMIN_ID}</code>\n\n"
         f"If these numbers don't match, you must update the ADMIN_ID variable in your Render dashboard!"
-    )
+    , parse_mode=ParseMode.HTML)
 
 @dp.message(Command("check_dest"), F.from_user.id == ADMIN_ID)
 async def check_destination_channel(message: Message):
@@ -643,7 +644,7 @@ async def check_destination_channel(message: Message):
             f"<b>ID:</b> <code>{chat.id}</code>\n"
             f"<b>Bot Status:</b> {status}\n"
             f"<b>Permissions:</b> {perm_text}"
-        )
+        , parse_mode=ParseMode.HTML)
     except TelegramNotFound:
         await message.answer(
             f"🚨 <b>Destination Channel Check: FAILED</b>\n\n"
@@ -652,7 +653,7 @@ async def check_destination_channel(message: Message):
             f"<b>How to fix:</b>\n"
             f"1. Make sure the `DESTINATION_CHANNEL_ID` in your environment variables is correct.\n"
             f"2. Add the bot to your destination channel as an admin."
-        )
+        , parse_mode=ParseMode.HTML)
     except Exception as e:
         await message.answer(f"An unexpected error occurred while checking the channel: {e}")
 
@@ -838,14 +839,16 @@ async def handle_start(message: Message, command: CommandStart):
             "<b>Verification Required</b>\n\n"
             "Please click the 'Click Ad to Verify' button below.\n"
             "After verifying, click 'Get Subtitle File' to receive your file.",
-            reply_markup=keyboard
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
         )).message_id
     else:
         bot_reply_msg_id = (await message.answer(
             f"<b>Verification Required</b>\n\n"
             f"Please click the verification button below.\n\n"
             f"<i>(No specific ad available at the moment.)</i>",
-            reply_markup=keyboard
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
         )).message_id
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
@@ -903,7 +906,7 @@ async def serve_file(callback: CallbackQuery):
             
     if file_id:
         caption = "✅ Here is your requested subtitle file!\n\n⏳ <i>This file will be automatically deleted in 5 minutes.</i>"
-        sent_file = await bot.send_document(user_id, file_id, caption=caption)
+        sent_file = await bot.send_document(user_id, file_id, caption=caption, parse_mode=ParseMode.HTML)
         
         # Clean up previous messages
         msgs_to_delete = {callback.message.message_id} # Use a set to avoid duplicates
@@ -935,9 +938,9 @@ async def catch_all(message: Message):
     if message.from_user.id == ADMIN_ID and message.chat.type == 'private':
         if message.text:
             if message.text.startswith('/post'):
-                return await message.reply("⚠️ **Command Error:**\nTo use `/post`, you must **reply** to a forwarded message that contains a photo and caption.")
+                return await message.reply("⚠️ <b>Command Error:</b>\nTo use <code>/post</code>, you must <b>reply</b> to a forwarded message that contains a photo and caption.", parse_mode=ParseMode.HTML)
             if message.text.startswith('/addad'):
-                return await message.reply("⚠️ **Command Error:**\nTo use `/addad`, you must **reply** to a forwarded ad message.")
+                return await message.reply("⚠️ <b>Command Error:</b>\nTo use <code>/addad</code>, you must <b>reply</b> to a forwarded ad message.", parse_mode=ParseMode.HTML)
         # For other admin messages that are not handled, we can stay silent to avoid noise.
         return
     # For non-admins, we can also choose to be silent to prevent the bot from being chatty in groups or with random users.
