@@ -113,6 +113,27 @@ async def _handle_backup_channel_check(message: Message, raw_args: str):
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return False # Block user
 
+async def _process_start_args_internal(user_id: int, user_full_name: str, raw_args: str, original_user_message_id: int):
+    """Internal helper to process start arguments after all checks."""
+    if raw_args.startswith("post_"): # Handle ALL post links
+        # Create a dummy Message object to pass to handle_post_deep_link
+        dummy_message = types.Message(
+            message_id=original_user_message_id,
+            from_user=types.User(id=user_id, is_bot=False, first_name=user_full_name),
+            chat=types.Chat(id=user_id, type='private'),
+            date=datetime.now(),
+            text=f"/start {raw_args}"
+        )
+        await handle_post_deep_link(dummy_message, raw_args)
+        
+        # Add warning for old format links
+        if not raw_args.startswith("post_content_"):
+            await bot.send_message(user_id, "⚠️ <b>Warning:</b> This post link is using an old format and might expire if the original message is deleted. Please ask the admin to re-post using the new system for more reliable access.", parse_mode=ParseMode.HTML)
+
+    else: # It's a subtitle file hash
+        file_hash = raw_args
+        await proceed_with_verification(user_id, user_full_name, file_hash, original_user_message_id)
+
 async def proceed_with_verification(chat_id: int, user_full_name: str, file_hash: str, user_msg_id: int):
     """Handles the ad forwarding and verification message sending."""
     request_key = f"{chat_id}_{file_hash}"

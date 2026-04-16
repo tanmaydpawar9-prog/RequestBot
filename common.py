@@ -23,7 +23,7 @@ async def global_error_handler(event: ErrorEvent):
         try:
             msg = await bot.send_message(
                 ADMIN_ID,
-                f"🚨 <b>BOT ERROR!</b>\n\n<code>{event.exception}</code>\n\nCheck Render logs for full details."
+                f"🚨 <b>BOT ERROR!</b>\n\n<code>{event.exception}</code>\n\n Contact Admin @cosmicatomic."
             )
             asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         except Exception:
