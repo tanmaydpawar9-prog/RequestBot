@@ -93,6 +93,43 @@ async def handle_post_deep_link(message: Message, raw_args: str):
     message_id = parts[-1]
     username = "_".join(parts[1:-1])
     user_id = message.from_user.id
+
+    # --- NEW: Backup Channel Check ---
+    active_backup_channel = None
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT channel_id, full_name FROM backup_channels WHERE is_active = TRUE LIMIT 1")
+            active_backup_channel = cursor.fetchone()
+
+    if active_backup_channel:
+        try:
+            member = await bot.get_chat_member(active_backup_channel['channel_id'], user_id)
+            if member.status in ['left', 'kicked']:
+                try:
+                    chat = await bot.get_chat(active_backup_channel['channel_id'])
+                    invite_link = chat.invite_link
+                    if not invite_link:
+                        invite_link = await bot.export_chat_invite_link(active_backup_channel['channel_id'])
+                    
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text=f"➡️ Request to Join {active_backup_channel['full_name']}", url=invite_link)]
+                    ])
+                    msg = await message.answer(
+                        "<b>❗️ Access Requirement</b>\n\n"
+                        "To get this content, you must be a member of our backup channel.\n\n"
+                        "1. Click the button below to send a join request.\n"
+                        "2. Wait for an admin to approve your request.\n"
+                        "3. Once approved, click the original link again.",
+                        reply_markup=keyboard
+                    )
+                    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                    return # Block the user
+                except Exception as e_link:
+                    logging.error(f"Failed to get invite link for backup channel {active_backup_channel['channel_id']}: {e_link}")
+        except Exception as e:
+            logging.error(f"Could not check backup channel membership for {user_id}: {e}")
+    # --- End of Backup Channel Check ---
+
     link = f"https://t.me/{username}/{message_id}"
 
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
@@ -178,6 +215,43 @@ async def handle_start(message: Message, command: CommandStart):
 
     file_hash = raw_args
     user_id = message.from_user.id
+
+    # --- NEW: Backup Channel Check ---
+    active_backup_channel = None
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT channel_id, full_name FROM backup_channels WHERE is_active = TRUE LIMIT 1")
+            active_backup_channel = cursor.fetchone()
+
+    if active_backup_channel:
+        try:
+            member = await bot.get_chat_member(active_backup_channel['channel_id'], user_id)
+            if member.status in ['left', 'kicked']:
+                try:
+                    chat = await bot.get_chat(active_backup_channel['channel_id'])
+                    invite_link = chat.invite_link
+                    if not invite_link:
+                        invite_link = await bot.export_chat_invite_link(active_backup_channel['channel_id'])
+                    
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text=f"➡️ Request to Join {active_backup_channel['full_name']}", url=invite_link)]
+                    ])
+                    msg = await message.answer(
+                        "<b>❗️ Access Requirement</b>\n\n"
+                        "To use this bot, you must be a member of our backup channel.\n\n"
+                        "1. Click the button below to send a join request.\n"
+                        "2. Wait for an admin to approve your request.\n"
+                        "3. Once approved, click the original link again.",
+                        reply_markup=keyboard
+                    )
+                    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                    return # Block the user
+                except Exception as e_link:
+                    logging.error(f"Failed to get invite link for backup channel {active_backup_channel['channel_id']}: {e_link}")
+        except Exception as e:
+            logging.error(f"Could not check backup channel membership for {user_id}: {e}")
+    # --- End of Backup Channel Check ---
+
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
             cursor.execute("SELECT file_id FROM files WHERE hash = %s", (file_hash,))

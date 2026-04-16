@@ -55,6 +55,88 @@ async def set_channel_command(message: Message):
         msg = await message.answer(f"❌ An error occurred: {e}")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
+@admin_router.message(Command("addback"), F.from_user.id == ADMIN_ID)
+async def add_backup_channel_command(message: Message):
+    """Admin command to register a backup channel."""
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        msg = await message.answer("Usage: `/addback <channel_id_or_username>`\n\nExample: `/addback @MyBackupChannel` or `/addback -1001234567890`", parse_mode=ParseMode.MARKDOWN)
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
+
+    channel_identifier = args[1]
+    
+    try:
+        chat = await bot.get_chat(channel_identifier)
+        channel_id = chat.id
+        full_name = chat.title
+
+        if chat.type != 'channel':
+            msg = await message.answer("❌ The provided ID/username does not belong to a channel.")
+            asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+            return
+        
+        bot_member = await bot.get_chat_member(channel_id, bot.id)
+        if not isinstance(bot_member, (ChatMemberOwner, ChatMemberAdministrator)) or (isinstance(bot_member, ChatMemberAdministrator) and not bot_member.can_invite_users):
+             await message.answer(f"⚠️ Bot is not an admin in '{full_name}' or lacks the 'Invite Users via Link' permission, which is required to approve join requests.")
+
+        with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("INSERT INTO backup_channels (channel_id, full_name) VALUES (%s, %s) ON CONFLICT (channel_id) DO UPDATE SET full_name = EXCLUDED.full_name",
+                               (channel_id, full_name))
+                conn.commit()
+        msg = await message.answer(f"✅ Backup channel '{full_name}' registered (ID: <code>{channel_id}</code>).")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+    except TelegramNotFound:
+        msg = await message.answer("❌ Channel not found. Make sure the bot is in the channel and the ID/username is correct.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+    except Exception as e:
+        msg = await message.answer(f"❌ An error occurred: {e}")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+
+@admin_router.message(Command("backup"), F.from_user.id == ADMIN_ID)
+async def backup_command(message: Message):
+    """Admin command to activate or deactivate force-join for a backup channel."""
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        msg = await message.answer("Usage: `/backup <channel_id>` or `/backup off`\n\nUse `/backup off` to disable backup channel force-join.", parse_mode=ParseMode.MARKDOWN)
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
+
+    target = args[1].lower()
+
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("UPDATE backup_channels SET is_active = FALSE")
+            
+            if target == 'off':
+                conn.commit()
+                msg = await message.answer("✅ Backup channel force-join has been deactivated.")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                return
+
+            try:
+                target_id = int(target)
+                cursor.execute("SELECT full_name FROM backup_channels WHERE channel_id = %s", (target_id,))
+                channel = cursor.fetchone()
+                if not channel:
+                    msg = await message.answer(f"❌ Channel ID <code>{target_id}</code> is not registered as a backup channel. Use `/addback` first.")
+                    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                    return
+                
+                cursor.execute("UPDATE backup_channels SET is_active = TRUE WHERE channel_id = %s", (target_id,))
+                conn.commit()
+                msg = await message.answer(f"✅ Force-join activated for backup channel '{channel['full_name']}' (<code>{target_id}</code>).")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+
+            except ValueError:
+                msg = await message.answer("❌ Invalid Channel ID. Please provide a numeric ID or 'off'.")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+            except Exception as e:
+                conn.rollback()
+                msg = await message.answer(f"❌ An error occurred: {e}")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+
 @admin_router.callback_query(F.data.startswith("post_to_channel_"), F.from_user.id == ADMIN_ID)
 async def post_to_channel_callback(callback: CallbackQuery):
     """Handles admin's selection of a channel to post the subtitle to."""
@@ -610,3 +692,36 @@ async def register_previous_ad_command(message: Message):
     else:
         msg = await message.reply("❌ No URL found in the replied message.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+
+@admin_router.message(Command("accept"), F.from_user.id == ADMIN_ID)
+async def accept_join_requests(message: Message):
+    """Admin command to approve all pending join requests for backup channels."""
+    status_msg = await message.answer("⏳ Processing pending join requests...")
+    
+    approved_count = 0
+    failed_count = 0
+    
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT chat_id, user_id FROM pending_join_requests")
+            requests = cursor.fetchall()
+            
+            if not requests:
+                await status_msg.edit_text("✅ No pending join requests to approve.")
+                asyncio.create_task(delete_message_later(status_msg.chat.id, status_msg.message_id, 300))
+                return
+
+            for req in requests:
+                try:
+                    await bot.approve_chat_join_request(chat_id=req['chat_id'], user_id=req['user_id'])
+                    approved_count += 1
+                except Exception as e:
+                    logging.error(f"Failed to approve join request for user {req['user_id']} in chat {req['chat_id']}: {e}")
+                    failed_count += 1
+                
+                cursor.execute("DELETE FROM pending_join_requests WHERE chat_id = %s AND user_id = %s", (req['chat_id'], req['user_id']))
+            
+            conn.commit()
+
+    await status_msg.edit_text(f"✅ <b>Join Request Processing Complete</b>\n\n- Approved: {approved_count}\n- Failed: {failed_count}")
+    asyncio.create_task(delete_message_later(status_msg.chat.id, status_msg.message_id, 300))

@@ -6,7 +6,7 @@ import asyncio
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, ErrorEvent
+from aiogram.types import Message, ErrorEvent, ChatJoinRequest
 
 from config import bot, ADMIN_ID, ADS_BOT_ID, DATABASE_URL
 from utils import extract_ad_url, delete_message_later
@@ -46,6 +46,21 @@ async def track_channel_ads(message: Message):
                                    (message.chat.id, message.message_id, ad_url, time.time()))
                     conn.commit()
                     logging.info(f"✨ New ad registered automatically from Ads Bot: {ad_url}")
+
+@common_router.chat_join_request()
+async def handle_join_requests(request: ChatJoinRequest):
+    """Stores a user's request to join a channel, so it can be approved later."""
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor() as cursor:
+            # Check if it's a backup channel we should be tracking
+            cursor.execute("SELECT 1 FROM backup_channels WHERE channel_id = %s", (request.chat.id,))
+            if cursor.fetchone():
+                logging.info(f"Storing join request from user {request.from_user.id} for channel {request.chat.id}")
+                cursor.execute("""
+                    INSERT INTO pending_join_requests (chat_id, user_id, timestamp) VALUES (%s, %s, %s)
+                    ON CONFLICT(chat_id, user_id) DO NOTHING
+                """, (request.chat.id, request.from_user.id, time.time()))
+                conn.commit()
 
 @common_router.message(Command("ping"))
 async def ping_handler(message: Message):
