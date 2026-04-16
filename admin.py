@@ -95,14 +95,8 @@ async def post_to_channel_callback(callback: CallbackQuery):
             else:
                 caption_text = f"<b>{channel_full_name}</b>"
 
-            # Construct the desired filename for the download
-            file_extension = os.path.splitext(original_filename)[1] or ".ass" # Default to .ass
-            download_filename = f"[ENG] {short_name} {episode_info} @{bot_info.username}{file_extension}".strip().replace("  ", " ")
-
-            # Update the filename in the DB and create a clean link
-            cursor.execute("UPDATE files SET filename = %s WHERE hash = %s", (download_filename, file_hash))
-            conn.commit()
-            deep_link = f"https://t.me/{bot_info.username}?start={file_hash}"
+            # Create a clean link
+            deep_link = f"https://t.me/{bot_info.username}?start={file_hash}" # The filename is already in the DB
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⬇️ Download Subtitle", url=deep_link)]
@@ -384,12 +378,8 @@ async def handle_admin_upload(message: Message):
                     episode_info = episode_match.group(0).upper() if episode_match else ""
                     caption_text = f"<b>{channel_full_name} {episode_info}</b>" if episode_info else f"<b>{channel_full_name}</b>"
                     file_extension = os.path.splitext(original_filename)[1] or ".ass"
-                    download_filename = f"[ENG] {short_name_from_filename} {episode_info} @{bot_info.username}{file_extension}".strip().replace("  ", " ")
 
-                    cursor.execute("UPDATE files SET filename = %s WHERE hash = %s", (download_filename, file_hash))
-                    conn.commit()
                     deep_link = f"https://t.me/{bot_info.username}?start={file_hash}"
-                    
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Subtitle", url=deep_link)]])
                     
                     try:
@@ -611,6 +601,7 @@ async def register_previous_ad_command(message: Message):
                 cursor.execute("SELECT 1 FROM ads WHERE message_id = %s AND channel_id = %s", (orig_msg_id, channel_id))
                 if not cursor.fetchone():
                     cursor.execute("INSERT INTO ads (channel_id, message_id, url, timestamp) VALUES (%s, %s, %s, %s)", (channel_id, orig_msg_id, ad_url, time.time()))
+                    conn.commit()
                     msg = await message.reply(f"✅ Ad (ID: {orig_msg_id}) successfully registered!")
                     asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
                 else:

@@ -21,27 +21,37 @@ async def proceed_with_verification(chat_id: int, user_full_name: str, file_hash
     
     ad_url = "https://example.com"
     fwd_msg_id = None
-    
+    ads_db = []
+
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # Clean up old ads and fetch the list of available ads
+            cursor.execute("DELETE FROM ads WHERE %s - timestamp > 86400", (time.time(),))
+            conn.commit()
+            cursor.execute("SELECT channel_id, message_id, url FROM ads")
+            ads_db = cursor.fetchall()
+
             max_ad_attempts = 5
             for _ in range(max_ad_attempts):
-                cursor.execute("DELETE FROM ads WHERE %s - timestamp > 86400", (time.time(),))
-                cursor.execute("SELECT channel_id, message_id, url FROM ads")
-                ads_db = cursor.fetchall()
-                if not ads_db: break
+                if not ads_db:
+                    logging.warning("No ads available in the database for verification.")
+                    break
 
                 selected_ad = random.choice(ads_db)
                 ad_url, ad_msg_id, ad_channel_id = selected_ad['url'], selected_ad['message_id'], selected_ad['channel_id']
 
                 try:
+                    # Attempt to forward the ad message
                     sent_fwd = await bot.forward_message(chat_id=chat_id, from_chat_id=ad_channel_id, message_id=ad_msg_id)
                     fwd_msg_id = sent_fwd.message_id
-                    break
+                    break # Success, exit the loop
                 except (TelegramBadRequest, TelegramNotFound) as e:
+                    # If forwarding fails, the ad is likely deleted. Remove it from DB and our local list.
                     logging.warning(f"Ad message {ad_msg_id} not found. Removing from DB. Error: {e}")
                     cursor.execute("DELETE FROM ads WHERE channel_id = %s AND message_id = %s", (ad_channel_id, ad_msg_id))
                     conn.commit()
+                    # Remove from the local list to avoid retrying the same failed ad
+                    ads_db = [ad for ad in ads_db if not (ad['message_id'] == ad_msg_id and ad['channel_id'] == ad_channel_id)]
             
             cursor.execute("""
                 INSERT INTO users (user_id, name, total_requests) VALUES (%s, %s, 1) 
@@ -95,7 +105,6 @@ async def handle_post_deep_link(message: Message, raw_args: str):
             if user_row and user_row['last_verified_timestamp'] and (time.time() - user_row['last_verified_timestamp'] < 600):
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
                 msg = await message.answer("You are already verified. Here is your episode:", reply_markup=keyboard)
-                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
                 return
 
             # --- Proceed with new verification ---
@@ -105,7 +114,6 @@ async def handle_post_deep_link(message: Message, raw_args: str):
     if not all_channels:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
         msg = await message.answer("Here is your requested episode:", reply_markup=keyboard)
-        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
         
     # Select one random channel
@@ -123,7 +131,6 @@ async def handle_post_deep_link(message: Message, raw_args: str):
                     cursor.execute("INSERT INTO users (user_id, last_verified_timestamp) VALUES (%s, %s) ON CONFLICT(user_id) DO UPDATE SET last_verified_timestamp = EXCLUDED.last_verified_timestamp", (user_id, time.time()))
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
             msg = await message.answer("Thank you for being a member! Here is your episode:", reply_markup=keyboard)
-            asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
             return
     except Exception as e:
         # This can happen if bot is not admin. We can't check membership, so we'll just show the join buttons and let the callback handle verification.
@@ -188,7 +195,7 @@ async def handle_start(message: Message, command: CommandStart):
                 if invite_link:
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text=f"1. Join {chat.title} 🚀", url=invite_link)],
-                        [InlineKeyboardButton(text="2. ✅ I Have Joined", callback_data=f"verify_join_{file_hash}")]
+                        [InlineKeyboardButton(text="✅ I Have Joined", callback_data=f"verify_join_{file_hash}")]
                     ])
                     msg = await message.answer("<b>Join Required!</b>\n\nTo get your file, you must first join our channel. 👇", reply_markup=keyboard)
                     asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
@@ -246,8 +253,6 @@ async def serve_file(callback: CallbackQuery):
                 try: await bot.delete_message(user_id, m_id)
                 except (TelegramNotFound, TelegramBadRequest): pass
                 
-        if sent_file:
-            asyncio.create_task(delete_message_later(user_id, sent_file.message_id, 300))
     else:
         await callback.answer("File no longer available. 😔", show_alert=True)
         
@@ -314,7 +319,6 @@ async def handle_post_join_check(callback: CallbackQuery):
         link = f"https://t.me/{username}/{message_id}"
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
         await callback.message.edit_text("✅ Verification successful! Here is your episode:", reply_markup=keyboard)
-        asyncio.create_task(delete_message_later(callback.message.chat.id, callback.message.message_id, 300))
     except Exception as e:
         logging.error(f"Error in final step of handle_post_join_check: {e}")
         await callback.answer("An error occurred. Please try again.", show_alert=True)

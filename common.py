@@ -40,10 +40,11 @@ async def track_channel_ads(message: Message):
     if ad_url:
         with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT 1 FROM ads WHERE message_id = %s", (message.message_id,))
+                cursor.execute("SELECT 1 FROM ads WHERE message_id = %s AND channel_id = %s", (message.message_id, message.chat.id))
                 if not cursor.fetchone():
                     cursor.execute("INSERT INTO ads (channel_id, message_id, url, timestamp) VALUES (%s, %s, %s, %s)",
                                    (message.chat.id, message.message_id, ad_url, time.time()))
+                    conn.commit()
                     logging.info(f"✨ New ad registered automatically from Ads Bot: {ad_url}")
 
 @common_router.message(Command("ping"))
