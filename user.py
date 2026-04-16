@@ -125,8 +125,7 @@ async def handle_post_deep_link(message: Message, raw_args: str):
             return
     except Exception as e:
         logging.error(f"Error checking membership for random channel {req_channel_id}: {e}")
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
-        msg = await message.answer("Here is your requested episode:", reply_markup=keyboard)
+        msg = await message.answer("❌ <b>System Error:</b> Could not verify channel membership. Please make sure the bot is added as an administrator to all registered force-join channels.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
 
@@ -280,4 +279,4 @@ async def handle_random_post_join(callback: CallbackQuery):
         asyncio.create_task(delete_message_later(callback.message.chat.id, callback.message.message_id, 300))
     except Exception as e:
         logging.error(f"Error checking membership in callback: {e}")
-        await callback.answer("An error occurred while verifying. Please try again.", show_alert=True)
+        await callback.answer("❌ Configuration Error: The bot must be an admin in the channel to verify membership.", show_alert=True)
