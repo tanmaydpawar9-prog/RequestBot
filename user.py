@@ -10,7 +10,7 @@ from aiogram.filters import CommandStart
 from aiogram.exceptions import TelegramBadRequest, TelegramNotFound
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 
-from config import bot, DATABASE_URL, DESTINATION_CHANNEL_ID, MAIN_CHANNEL_INVITE_LINK, WEB_APP_DOMAIN
+from config import bot, DATABASE_URL, DESTINATION_CHANNEL_ID, MAIN_CHANNEL_INVITE_LINK, WEB_APP_DOMAIN, POST_FORCE_JOIN_CACHE, POST_FORCE_JOIN_CACHE_DURATION
 from utils import cleanup_unclicked_request, delete_message_later
 
 user_router = Router()
@@ -102,9 +102,29 @@ async def handle_post_deep_link(message: Message, raw_args: str):
             active_backup_channel = cursor.fetchone()
 
     if active_backup_channel:
+        is_member = False
         try:
             member = await bot.get_chat_member(active_backup_channel['channel_id'], user_id)
-            if member.status in ['left', 'kicked']:
+            if member.status not in ['left', 'kicked']:
+                is_member = True
+        except (TelegramBadRequest, TelegramNotFound) as e:
+            logging.info(f"User {user_id} is not a member of backup channel {active_backup_channel['channel_id']} (check resulted in: {e})")
+            is_member = False
+        except Exception as e:
+            logging.error(f"Could not check backup channel membership for {user_id}: {e}")
+            msg = await message.answer("<b>System Error</b>\n\nCould not verify your membership status. Please try again later or contact an admin.")
+            asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+            return # Block on critical error
+
+        if not is_member: # If user is not a member of the backup channel
+            with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT 1 FROM pending_join_requests WHERE chat_id = %s AND user_id = %s",
+                                   (active_backup_channel['channel_id'], user_id))
+                    is_pending = cursor.fetchone()
+
+            # If no pending request is found, prompt the user to send one.
+            if not is_pending:
                 try:
                     chat = await bot.get_chat(active_backup_channel['channel_id'])
                     invite_link = chat.invite_link
@@ -116,36 +136,25 @@ async def handle_post_deep_link(message: Message, raw_args: str):
                     ])
                     msg = await message.answer(
                         "<b>❗️ Access Requirement</b>\n\n"
-                        "To get this content, you must be a member of our backup channel.\n\n"
-                        "1. Click the button below to send a join request.\n"
-                        "2. Wait for an admin to approve your request.\n"
-                        "3. Once approved, click the original link again.",
+                        "To get this content, you must send a join request to our backup channel.\n\n"
+                        "1. Click the button below to send a request.\n"
+                        "2. After sending the request, click the original link again to proceed.",
                         reply_markup=keyboard
                     )
                     asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
                     return # Block the user
                 except Exception as e_link:
                     logging.error(f"Failed to get invite link for backup channel {active_backup_channel['channel_id']}: {e_link}")
-        except Exception as e:
-            logging.error(f"Could not check backup channel membership for {user_id}: {e}")
+                    msg = await message.answer("<b>System Error</b>\n\nCould not generate a join link. Please contact an admin.")
+                    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                    return # Block user
     # --- End of Backup Channel Check ---
 
     link = f"https://t.me/{username}/{message_id}"
 
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            # Check user's last verification timestamp
-            cursor.execute("SELECT last_verified_timestamp FROM users WHERE user_id = %s", (user_id,))
-            user_row = cursor.fetchone()
-            
-            # If user verified in the last 10 minutes (600 seconds), give link directly
-            if user_row and user_row['last_verified_timestamp'] and (time.time() - user_row['last_verified_timestamp'] < 600):
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
-                msg = await message.answer("You are already verified. Here is your episode:", reply_markup=keyboard)
-                return
-
-            # --- Proceed with new verification ---
-            cursor.execute("SELECT short_name, channel_id, full_name FROM channels")
+            cursor.execute("SELECT short_name, channel_id, full_name FROM channels ORDER BY channel_id") # Order for consistent selection if cache is empty
             all_channels = cursor.fetchall()
     
     if not all_channels:
@@ -153,19 +162,31 @@ async def handle_post_deep_link(message: Message, raw_args: str):
         msg = await message.answer("Here is your requested episode:", reply_markup=keyboard)
         return
         
-    # Select one random channel
-    target_channel = random.choice(all_channels)
+    # --- Force-Join Channel Selection Logic ---
+    global POST_FORCE_JOIN_CACHE
+
+    current_time = time.time()
+    target_channel = None
+
+    # Check if the cached channel is still valid
+    if POST_FORCE_JOIN_CACHE["channel"] and (current_time - POST_FORCE_JOIN_CACHE["timestamp"] < POST_FORCE_JOIN_CACHE_DURATION):
+        target_channel = POST_FORCE_JOIN_CACHE["channel"]
+        logging.info(f"Using cached force-join channel: {target_channel['full_name']}")
+    else:
+        # Select a new random channel and update the cache
+        target_channel = random.choice(all_channels)
+        POST_FORCE_JOIN_CACHE["channel"] = target_channel
+        POST_FORCE_JOIN_CACHE["timestamp"] = current_time
+        logging.info(f"Selected new force-join channel: {target_channel['full_name']}")
+
     req_short_name = target_channel['short_name']
     req_channel_id = target_channel['channel_id']
     channel_full_name = target_channel['full_name']
     
     try:
         member = await bot.get_chat_member(req_channel_id, user_id)
-        # If user is already a member of the randomly selected channel, verify them and give the link
+        # If user is already a member of the required channel, give the link directly
         if member.status not in ['left', 'kicked', 'restricted']:
-            with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("INSERT INTO users (user_id, last_verified_timestamp) VALUES (%s, %s) ON CONFLICT(user_id) DO UPDATE SET last_verified_timestamp = EXCLUDED.last_verified_timestamp", (user_id, time.time()))
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
             msg = await message.answer("Thank you for being a member! Here is your episode:", reply_markup=keyboard)
             return
@@ -224,9 +245,29 @@ async def handle_start(message: Message, command: CommandStart):
             active_backup_channel = cursor.fetchone()
 
     if active_backup_channel:
+        is_member = False
         try:
             member = await bot.get_chat_member(active_backup_channel['channel_id'], user_id)
-            if member.status in ['left', 'kicked']:
+            if member.status not in ['left', 'kicked']:
+                is_member = True
+        except (TelegramBadRequest, TelegramNotFound) as e:
+            logging.info(f"User {user_id} is not a member of backup channel {active_backup_channel['channel_id']} (check resulted in: {e})")
+            is_member = False
+        except Exception as e:
+            logging.error(f"Could not check backup channel membership for {user_id}: {e}")
+            msg = await message.answer("<b>System Error</b>\n\nCould not verify your membership status. Please try again later or contact an admin.")
+            asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+            return # Block on critical error
+
+        if not is_member: # If user is not a member of the backup channel
+            with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT 1 FROM pending_join_requests WHERE chat_id = %s AND user_id = %s",
+                                   (active_backup_channel['channel_id'], user_id))
+                    is_pending = cursor.fetchone()
+
+            # If no pending request is found, prompt the user to send one.
+            if not is_pending:
                 try:
                     chat = await bot.get_chat(active_backup_channel['channel_id'])
                     invite_link = chat.invite_link
@@ -238,18 +279,18 @@ async def handle_start(message: Message, command: CommandStart):
                     ])
                     msg = await message.answer(
                         "<b>❗️ Access Requirement</b>\n\n"
-                        "To use this bot, you must be a member of our backup channel.\n\n"
-                        "1. Click the button below to send a join request.\n"
-                        "2. Wait for an admin to approve your request.\n"
-                        "3. Once approved, click the original link again.",
+                        "To use this bot, you must send a join request to our backup channel.\n\n"
+                        "1. Click the button below to send a request.\n"
+                        "2. After sending the request, click the original link again to proceed.",
                         reply_markup=keyboard
                     )
                     asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
                     return # Block the user
                 except Exception as e_link:
                     logging.error(f"Failed to get invite link for backup channel {active_backup_channel['channel_id']}: {e_link}")
-        except Exception as e:
-            logging.error(f"Could not check backup channel membership for {user_id}: {e}")
+                    msg = await message.answer("<b>System Error</b>\n\nCould not generate a join link. Please contact an admin.")
+                    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                    return # Block user
     # --- End of Backup Channel Check ---
 
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:

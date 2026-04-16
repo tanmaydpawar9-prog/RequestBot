@@ -74,6 +74,11 @@ else:
 # Stores {admin_id: {'file_hash': '...', 'file_name': '...'}}
 admin_temp_state = {}
 
+# Cache for the currently active force-join channel for /post links
+# Stores {"channel": {"short_name": ..., "channel_id": ..., "full_name": ...}, "timestamp": ...}
+POST_FORCE_JOIN_CACHE = {"channel": None, "timestamp": 0}
+POST_FORCE_JOIN_CACHE_DURATION = 600 # 10 minutes (in seconds)
+
 # Cache for eligible force join channels
 ELIGIBLE_CHANNELS_CACHE = {"channels": [], "timestamp": 0}
 CACHE_DURATION = 300 # Cache for 5 minutes
