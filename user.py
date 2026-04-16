@@ -125,8 +125,12 @@ async def handle_post_deep_link(message: Message, raw_args: str):
             msg = await message.answer("Thank you for being a member! Here is your episode:", reply_markup=keyboard)
             asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
             return
-
-        # User is NOT a member, so show the join prompt
+    except Exception as e:
+        # This can happen if bot is not admin. We can't check membership, so we'll just show the join buttons and let the callback handle verification.
+        logging.warning(f"Could not check membership for channel {req_channel_id}, likely not admin. Proceeding with join prompt. Error: {e}")
+    
+    # Show the join prompt if the initial check failed OR if the user is confirmed not to be a member.
+    try:
         chat = await bot.get_chat(req_channel_id)
         invite_link = chat.invite_link
         if not invite_link:
@@ -135,6 +139,9 @@ async def handle_post_deep_link(message: Message, raw_args: str):
                 logging.warning(f"Failed to export invite link for {req_channel_id}: {e_link}")
                 invite_link = f"https://t.me/{chat.username}" if chat.username else None
         
+        if not invite_link:
+            raise Exception("Could not retrieve a valid invite link for the channel.")
+
         callback_data = f"cp_check_{req_short_name}_{username}_{message_id}"
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -143,12 +150,10 @@ async def handle_post_deep_link(message: Message, raw_args: str):
         ])
         msg = await message.answer("<b>Join Required!</b>\n\nPlease join the following channel to get your episode link. 👇", reply_markup=keyboard)
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
-
-    except Exception as e:
-        logging.error(f"Error checking membership for channel {req_channel_id}: {e}")
+    except Exception as e_final:
+        logging.error(f"Failed to get invite link or show join prompt for {req_channel_id}: {e_final}")
         msg = await message.answer("❌ <b>System Error:</b> Could not verify channel membership. Please make sure the bot is added as an administrator to all registered force-join channels.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
-        return
 
 @user_router.message(CommandStart())
 async def handle_start(message: Message, command: CommandStart):
