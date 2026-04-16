@@ -83,48 +83,69 @@ async def handle_post_deep_link(message: Message, raw_args: str):
     message_id = parts[-1]
     username = "_".join(parts[1:-1])
     user_id = message.from_user.id
-    
+    link = f"https://t.me/{username}/{message_id}"
+
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # Check user's last verification timestamp
+            cursor.execute("SELECT last_verified_timestamp FROM users WHERE user_id = %s", (user_id,))
+            user_row = cursor.fetchone()
+            
+            # If user verified in the last 10 minutes (600 seconds), give link directly
+            if user_row and user_row['last_verified_timestamp'] and (time.time() - user_row['last_verified_timestamp'] < 600):
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
+                msg = await message.answer("You are already verified. Here is your episode:", reply_markup=keyboard)
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                return
+
+            # --- Proceed with new verification ---
             cursor.execute("SELECT short_name, channel_id, full_name FROM channels")
-            channels = cursor.fetchall()
+            all_channels = cursor.fetchall()
     
-    target_channel = random.choice(channels) if channels else None
-    link = f"https://t.me/{username}/{message_id}"
-    
-    if not target_channel:
+    if not all_channels:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
         msg = await message.answer("Here is your requested episode:", reply_markup=keyboard)
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
         
-    req_short_name, req_channel_id, channel_full_name = target_channel['short_name'], target_channel['channel_id'], target_channel['full_name']
+    # Select one random channel
+    target_channel = random.choice(all_channels)
+    req_short_name = target_channel['short_name']
+    req_channel_id = target_channel['channel_id']
+    channel_full_name = target_channel['full_name']
     
     try:
         member = await bot.get_chat_member(req_channel_id, user_id)
-        if member.status in ['left', 'kicked']:
-            chat = await bot.get_chat(req_channel_id)
-            invite_link = chat.invite_link
-            if not invite_link:
-                try: invite_link = await bot.export_chat_invite_link(req_channel_id)
-                except Exception as e:
-                    logging.warning(f"Failed to export invite link for {req_channel_id}: {e}")
-                    invite_link = f"https://t.me/{chat.username}" if chat.username else "https://t.me"
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"1. Join {channel_full_name} 🚀", url=invite_link)],
-                [InlineKeyboardButton(text="2. Download Episode ⬇️", callback_data=f"cp_{req_short_name}_{username}_{message_id}")]
-            ])
-            msg = await message.answer("<b>Join Required!</b>\n\nTo access this episode, you must first join our channel. 👇", reply_markup=keyboard)
-            asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
-            return
-        else:
+        # If user is already a member of the randomly selected channel, verify them and give the link
+        if member.status not in ['left', 'kicked', 'restricted']:
+            with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("INSERT INTO users (user_id, last_verified_timestamp) VALUES (%s, %s) ON CONFLICT(user_id) DO UPDATE SET last_verified_timestamp = EXCLUDED.last_verified_timestamp", (user_id, time.time()))
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
             msg = await message.answer("Thank you for being a member! Here is your episode:", reply_markup=keyboard)
             asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
             return
+
+        # User is NOT a member, so show the join prompt
+        chat = await bot.get_chat(req_channel_id)
+        invite_link = chat.invite_link
+        if not invite_link:
+            try: invite_link = await bot.export_chat_invite_link(req_channel_id)
+            except Exception as e_link:
+                logging.warning(f"Failed to export invite link for {req_channel_id}: {e_link}")
+                invite_link = f"https://t.me/{chat.username}" if chat.username else None
+        
+        callback_data = f"cp_check_{req_short_name}_{username}_{message_id}"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"1. Join {channel_full_name} 🚀", url=invite_link)],
+            [InlineKeyboardButton(text="2. Download Episode ⬇️", callback_data=callback_data)]
+        ])
+        msg = await message.answer("<b>Join Required!</b>\n\nPlease join the following channel to get your episode link. 👇", reply_markup=keyboard)
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+
     except Exception as e:
-        logging.error(f"Error checking membership for random channel {req_channel_id}: {e}")
+        logging.error(f"Error checking membership for channel {req_channel_id}: {e}")
         msg = await message.answer("❌ <b>System Error:</b> Could not verify channel membership. Please make sure the bot is added as an administrator to all registered force-join channels.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
@@ -250,33 +271,45 @@ async def handle_join_verification(callback: CallbackQuery):
         await callback.answer("An error occurred while verifying. Please try again.", show_alert=True)
 
 @user_router.callback_query(F.data.startswith("cp_"))
-async def handle_random_post_join(callback: CallbackQuery):
-    """Handles the 'Download Episode' button after a random channel force join."""
+async def handle_post_join_check(callback: CallbackQuery):
+    """Handles the 'Download Episode' button click, verifying the single required channel join."""
     parts = callback.data.split("_")
-    if len(parts) < 4: return await callback.answer("Invalid callback.", show_alert=True)
-        
-    short_name = parts[1]
+    if len(parts) < 5 or parts[1] != 'check':
+        return await callback.answer("Invalid callback data.", show_alert=True)
+
+    req_short_name = parts[2]
     message_id = parts[-1]
-    username = "_".join(parts[2:-1])
+    username = "_".join(parts[3:-1])
     user_id = callback.from_user.id
-    
+
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute("SELECT channel_id FROM channels WHERE short_name = %s", (short_name,))
-            row = cursor.fetchone()
+            cursor.execute("SELECT channel_id FROM channels WHERE short_name = %s", (req_short_name,))
+            channel_row = cursor.fetchone()
+
+    if not channel_row:
+        return await callback.answer("The required channel is no longer registered.", show_alert=True)
+
+    req_channel_id = channel_row['channel_id']
     
-    if not row: return await callback.answer("Channel no longer exists.", show_alert=True)
-        
     try:
-        member = await bot.get_chat_member(row['channel_id'], user_id)
-        if member.status in ['left', 'kicked']:
-            return await callback.answer("❌ You haven't joined the channel yet. Please join and try again.", show_alert=True)
-            
+        member = await bot.get_chat_member(req_channel_id, user_id)
+        if member.status in ['left', 'kicked', 'restricted']:
+            return await callback.answer("❌ You haven't joined the required channel yet. Please join and try again.", show_alert=True)
+    except Exception:
+        return await callback.answer("❌ Configuration Error: The bot must be an admin in the channel to verify membership.", show_alert=True)
+
+    # If check passes, update timestamp and give link
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("INSERT INTO users (user_id, last_verified_timestamp) VALUES (%s, %s) ON CONFLICT(user_id) DO UPDATE SET last_verified_timestamp = EXCLUDED.last_verified_timestamp", (user_id, time.time()))
+
+    try:
         await callback.answer("Thank you for joining!", show_alert=False)
         link = f"https://t.me/{username}/{message_id}"
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
         await callback.message.edit_text("✅ Verification successful! Here is your episode:", reply_markup=keyboard)
         asyncio.create_task(delete_message_later(callback.message.chat.id, callback.message.message_id, 300))
     except Exception as e:
-        logging.error(f"Error checking membership in callback: {e}")
-        await callback.answer("❌ Configuration Error: The bot must be an admin in the channel to verify membership.", show_alert=True)
+        logging.error(f"Error in final step of handle_post_join_check: {e}")
+        await callback.answer("An error occurred. Please try again.", show_alert=True)

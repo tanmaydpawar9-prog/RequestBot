@@ -53,6 +53,11 @@ if DATABASE_URL:
                 if not cursor.fetchone():
                     cursor.execute("ALTER TABLE files ADD COLUMN filename TEXT")
 
+                # Add last_verified_timestamp column to users table if it doesn't exist
+                cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='last_verified_timestamp'")
+                if not cursor.fetchone():
+                    cursor.execute("ALTER TABLE users ADD COLUMN last_verified_timestamp REAL")
+
                 # Commit any schema changes
                 conn.commit()
         logging.info("Database schema checked and initialized.")
