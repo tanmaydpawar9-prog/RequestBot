@@ -32,9 +32,6 @@ async def global_error_handler(event: ErrorEvent):
 @common_router.channel_post()
 async def track_channel_ads(message: Message):
     """Monitors any channel the bot is in to automatically log ads."""
-    # Only track messages sent by the designated ads bot.
-    if not ADS_BOT_ID or not message.via_bot or message.via_bot.id != ADS_BOT_ID:
-        return
 
     ad_url = extract_ad_url(message)
     if ad_url:

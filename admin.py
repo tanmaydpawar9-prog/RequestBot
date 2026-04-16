@@ -631,19 +631,14 @@ async def post_forwarded_message(message: Message):
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
         
-    # Check if there are any force-join channels registered
-    has_channels = False
-    try:
-        with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT COUNT(*) FROM channels")
-                has_channels = cursor.fetchone()[0] > 0
-    except Exception:
-        pass
+    # Always store the photo and caption in the database for robust links.
+    # The force-join check will happen in user.py when the link is clicked.
+    content_hash = uuid.uuid4().hex[:8]
+    bot_info = await bot.me()
+    button_link = f"https://t.me/{bot_info.username}?start=post_content_{content_hash}" # New robust link
 
-    if has_channels:
-        # Store the photo and caption in the database
-        content_hash = uuid.uuid4().hex[:8]
+    # Store the photo and caption in the database (already validated to exist by earlier checks)
+    # forwarded_message.photo[-1].file_id and forwarded_message.caption are guaranteed to exist here.
         with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
             with conn.cursor() as cursor:
                 cursor.execute("INSERT INTO posted_content (hash, file_id, caption, timestamp) VALUES (%s, %s, %s, %s)",
@@ -651,10 +646,6 @@ async def post_forwarded_message(message: Message):
                 conn.commit()
 
         bot_info = await bot.me()
-        button_link = f"https://t.me/{bot_info.username}?start=post_content_{content_hash}" # New robust link
-    else:
-        button_link = f"https://t.me/{original_chat.username}/{forwarded_message.forward_from_message_id}" # Fallback to old link if no force-join channels
-
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"⬇️ {episode_info} | Download Here", url=button_link)]])
 
     try:
