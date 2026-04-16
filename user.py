@@ -78,7 +78,9 @@ async def handle_post_deep_link(message: Message, raw_args: str):
     if len(parts) < 3:
         return await message.answer("❌ Invalid post link.")
     
-    username, message_id, user_id = parts[1], parts[2], message.from_user.id
+    message_id = parts[-1]
+    username = "_".join(parts[1:-1])
+    user_id = message.from_user.id
     
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
@@ -238,7 +240,10 @@ async def handle_random_post_join(callback: CallbackQuery):
     parts = callback.data.split("_")
     if len(parts) < 4: return await callback.answer("Invalid callback.", show_alert=True)
         
-    short_name, username, message_id, user_id = parts[1], parts[2], parts[3], callback.from_user.id
+    short_name = parts[1]
+    message_id = parts[-1]
+    username = "_".join(parts[2:-1])
+    user_id = callback.from_user.id
     
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
@@ -259,44 +264,3 @@ async def handle_random_post_join(callback: CallbackQuery):
     except Exception as e:
         logging.error(f"Error checking membership in callback: {e}")
         await callback.answer("An error occurred while verifying. Please try again.", show_alert=True)
-
-@user_router.callback_query(F.data.startswith("verify_post_join_"))
-async def handle_post_join_verification(callback: CallbackQuery):
-    """Handles the initial click on a /post button. Checks for channel join."""
-    parts = callback.data.split("_", 3)
-    if len(parts) < 4: return await callback.answer("Invalid callback.", show_alert=True)
-
-    channel_username, message_id, user_id = parts[2], parts[3], callback.from_user.id
-    original_post_link = f"https.t.me/{channel_username}/{message_id}"
-
-    if not DESTINATION_CHANNEL_ID:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Here", url=original_post_link)]])
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
-        return await callback.answer("Redirecting...", show_alert=False)
-
-    try:
-        member = await bot.get_chat_member(DESTINATION_CHANNEL_ID, user_id)
-        if member.status not in ['left', 'kicked']:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Here", url=original_post_link)]])
-            await callback.message.edit_reply_markup(reply_markup=keyboard)
-            await callback.answer("Redirecting...", show_alert=False)
-        else:
-            chat = await bot.get_chat(DESTINATION_CHANNEL_ID)
-            invite_link = chat.invite_link or MAIN_CHANNEL_INVITE_LINK
-            if not invite_link:
-                return await callback.answer("Channel join verification is unavailable.", show_alert=True)
-
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"1. Join {chat.title} 🚀", url=invite_link)],
-                [InlineKeyboardButton(text="2. ✅ I Have Joined", callback_data=f"confirm_post_join_{channel_username}_{message_id}")]
-            ])
-            await callback.message.edit_text("<b>Join Required!</b>\n\nTo access this post, you must first join our channel. 👇", reply_markup=keyboard)
-            await callback.answer("Please join the channel first.", show_alert=True)
-    except Exception as e:
-        logging.error(f"Error during /post join verification: {e}")
-        await callback.answer("An error occurred while verifying.", show_alert=True)
-
-@user_router.callback_query(F.data.startswith("confirm_post_join_"))
-async def handle_confirm_post_join(callback: CallbackQuery):
-    """Handles the 'I Have Joined' button click after a /post verification."""
-    await handle_post_join_verification(callback)

@@ -492,9 +492,23 @@ async def post_forwarded_message(message: Message):
     if not original_chat.username:
         return await message.reply(f"❌ The source channel (<code>{original_chat.id}</code>) must be public.")
         
-    bot_info = await bot.me()
-    deep_link = f"https://t.me/{bot_info.username}?start=post_{original_chat.username}_{forwarded_message.forward_from_message_id}"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"⬇️ {episode_info} | Download Here", url=deep_link)]])
+    # Check if there are any force-join channels registered
+    has_channels = False
+    try:
+        with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM channels")
+                has_channels = cursor.fetchone()[0] > 0
+    except Exception:
+        pass
+
+    if has_channels:
+        bot_info = await bot.me()
+        button_link = f"https://t.me/{bot_info.username}?start=post_{original_chat.username}_{forwarded_message.forward_from_message_id}"
+    else:
+        button_link = f"https://t.me/{original_chat.username}/{forwarded_message.forward_from_message_id}"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"⬇️ {episode_info} | Download Here", url=button_link)]])
 
     try:
         copied_message = await bot.copy_message(
