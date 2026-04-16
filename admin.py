@@ -540,52 +540,62 @@ async def check_destination_channel(message: Message):
         msg = await message.answer(f"An unexpected error occurred: {e}")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
-@admin_router.message(Command("editbutton"), F.from_user.id == ADMIN_ID, F.reply_to_message)
-async def edit_inline_button(message: Message):
-    """Admin command to edit the inline button of a message previously posted by the bot."""
-    forwarded_message = message.reply_to_message
-    
-    if not DESTINATION_CHANNEL_ID:
-        msg = await message.reply("⚠️ `DESTINATION_CHANNEL_ID` is not set.")
+@admin_router.message(Command("editpost"), F.from_user.id == ADMIN_ID)
+async def edit_post_command(message: Message):
+    """Admin command to edit the button of a post via message link."""
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3 or '|' not in args[2]:
+        msg = await message.reply(
+            "❌ <b>Usage:</b>\n"
+            "<code>/editpost &lt;message_link&gt; New Button Text | https://new.link</code>\n\n"
+            "You can get the message link by right-clicking the post in the channel and selecting 'Copy Message Link'."
+        )
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
 
-    if not forwarded_message.forward_from_chat or forwarded_message.forward_from_chat.id != DESTINATION_CHANNEL_ID:
-        msg = await message.reply(f"❌ The forwarded message must be from the destination channel (ID: <code>{DESTINATION_CHANNEL_ID}</code>).")
+    message_link = args[1]
+    button_text, url = [arg.strip() for arg in args[2].split('|', 1)]
+
+    public_link_match = re.match(r'https://t\.me/([^/]+)/(\d+)', message_link)
+    private_link_match = re.match(r'https://t\.me/c/(\d+)/(\d+)', message_link)
+
+    if private_link_match:
+        chat_id = int(f"-100{private_link_match.group(1)}")
+        message_id = int(private_link_match.group(2))
+    elif public_link_match:
+        chat_id = f"@{public_link_match.group(1)}"
+        message_id = int(public_link_match.group(2))
+    else:
+        msg = await message.reply("❌ Invalid message link format. Please copy the link directly from Telegram.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
-
-    if not forwarded_message.forward_from or forwarded_message.forward_from.id != (await bot.me()).id:
-        msg = await message.reply("❌ The forwarded message must be one originally posted by this bot.")
-        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
-        return
-
-    command_args = message.text.split(' ', 1)
-    if len(command_args) < 2 or '|' not in command_args[1]:
-        msg = await message.reply("❌ Usage: `/editbutton New Text | https://new.link`", parse_mode=ParseMode.MARKDOWN_V2)
-        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
-        return
-
-    button_text, url = [arg.strip() for arg in command_args[1].split('|', 1)]
 
     if not button_text or not url or not url.startswith("https://"):
-        msg = await message.reply("❌ Invalid format. Button text and a valid https URL are required.")
+        msg = await message.reply("❌ Invalid button format. Both text and a valid https:// URL are required.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
 
     new_keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=button_text, url=url)]])
 
     try:
+        await bot.get_chat(chat_id)
         await bot.edit_message_reply_markup(
-            chat_id=DESTINATION_CHANNEL_ID,
-            message_id=forwarded_message.forward_from_message_id,
+            chat_id=chat_id,
+            message_id=message_id,
             reply_markup=new_keyboard
         )
-        msg = await message.reply("✅ Inline button updated!")
+        msg = await message.reply("✅ Post button updated successfully!")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+    except TelegramNotFound:
+        msg = await message.reply(f"🚨 <b>Update Failed!</b>\n\nCould not find the channel or message. Ensure the link is correct and the bot is an admin in that channel.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+    except TelegramBadRequest as e:
+        logging.error(f"Failed to edit post button. Error: {e}")
+        msg = await message.reply(f"🚨 <b>Update Failed!</b>\n\nError: <code>{e}</code>\n\nThis usually means the message wasn't sent by the bot, or the bot lacks permission to edit messages.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
     except Exception as e:
-        logging.error(f"Failed to edit inline button. Error: {e}")
-        msg = await message.reply(f"🚨 Failed to update button: <code>{e}</code>")
+        logging.error(f"Failed to edit post button. Error: {e}")
+        msg = await message.reply(f"🚨 <b>An unexpected error occurred!</b>\n\nError: <code>{e}</code>")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
 @admin_router.message(Command("post"), F.from_user.id == ADMIN_ID, F.reply_to_message)
