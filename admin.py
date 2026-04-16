@@ -6,6 +6,7 @@ import logging
 import psycopg2
 import psycopg2.extras
 import asyncio
+import uuid
 
 from aiogram import Router, F
 from aiogram.enums import ParseMode
@@ -631,10 +632,18 @@ async def post_forwarded_message(message: Message):
         pass
 
     if has_channels:
+        # Store the photo and caption in the database
+        content_hash = uuid.uuid4().hex[:8]
+        with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("INSERT INTO posted_content (hash, file_id, caption, timestamp) VALUES (%s, %s, %s, %s)",
+                               (content_hash, forwarded_message.photo[-1].file_id, forwarded_message.caption, time.time()))
+                conn.commit()
+
         bot_info = await bot.me()
-        button_link = f"https://t.me/{bot_info.username}?start=post_{original_chat.username}_{forwarded_message.forward_from_message_id}"
+        button_link = f"https://t.me/{bot_info.username}?start=post_content_{content_hash}" # New robust link
     else:
-        button_link = f"https://t.me/{original_chat.username}/{forwarded_message.forward_from_message_id}"
+        button_link = f"https://t.me/{original_chat.username}/{forwarded_message.forward_from_message_id}" # Fallback to old link if no force-join channels
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"⬇️ {episode_info} | Download Here", url=button_link)]])
 
