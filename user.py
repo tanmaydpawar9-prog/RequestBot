@@ -223,7 +223,7 @@ async def handle_post_deep_link(message: Message, raw_args: str):
             username = "_".join(parts[1:-1])
             link = f"https://t.me/{username}/{message_id}"
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💥 Download Episode", url=link)]])
-            await message.answer("Here is your requested episode:", reply_markup=keyboard)
+            await bot.send_message(user_id, "Here is your requested episode:", reply_markup=keyboard)
         return
         
     # Select a channel from cache or random
@@ -252,7 +252,7 @@ async def handle_post_deep_link(message: Message, raw_args: str):
     # If member, serve content
     if is_member:
         if raw_args.startswith("post_content_"):
-            await message.answer("Thank you for being a member! Here is your content:")
+            await bot.send_message(user_id, "Thank you for being a member! Here is your content:")
             content_hash = raw_args.split("post_content_", 1)[1]
             await _serve_posted_content(user_id, content_hash)
         else: # old link
@@ -261,7 +261,7 @@ async def handle_post_deep_link(message: Message, raw_args: str):
             username = "_".join(parts[1:-1])
             link = f"https://t.me/{username}/{message_id}"
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❤️‍🔥 Download Episode", url=link)]])
-            await message.answer("Thank you for being a member! Here is your episode:", reply_markup=keyboard)
+            await bot.send_message(user_id, "Thank you for being a member! Here is your episode:", reply_markup=keyboard)
         return
 
     # If not member, show join prompt
@@ -275,10 +275,10 @@ async def handle_post_deep_link(message: Message, raw_args: str):
             [InlineKeyboardButton(text=f"1. Join {channel_full_name} 🚀", url=invite_link)],
             [InlineKeyboardButton(text="2. I Have Joined ✅", callback_data=callback_data)]
         ])
-        await message.answer("<b>Join Required!</b>\n\nPlease join the following channel to get your episode link. 👇", reply_markup=keyboard)
+        await bot.send_message(user_id, "<b>Join Required!</b>\n\nPlease join the following channel to get your episode link. 👇", reply_markup=keyboard)
     except Exception as e_final:
         logging.error(f"Failed to get invite link or show join prompt for {req_channel_id}: {e_final}")
-        await message.answer("❌ <b>System Error:</b> Could not verify channel membership. 🌐Please Report To Admin @CosmicAtomic")
+        await bot.send_message(user_id, "❌ <b>System Error:</b> Could not verify channel membership. 🌐Please Report To Admin @CosmicAtomic")
 
 @user_router.message(CommandStart())
 async def handle_start(message: Message, command: CommandStart):
