@@ -639,13 +639,11 @@ async def post_forwarded_message(message: Message):
 
     # Store the photo and caption in the database (already validated to exist by earlier checks)
     # forwarded_message.photo[-1].file_id and forwarded_message.caption are guaranteed to exist here.
-        with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("INSERT INTO posted_content (hash, file_id, caption, timestamp) VALUES (%s, %s, %s, %s)",
-                               (content_hash, forwarded_message.photo[-1].file_id, forwarded_message.caption, time.time()))
-                conn.commit()
-
-        bot_info = await bot.me()
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("INSERT INTO posted_content (hash, file_id, caption, timestamp) VALUES (%s, %s, %s, %s)",
+                           (content_hash, forwarded_message.photo[-1].file_id, forwarded_message.caption, time.time()))
+            conn.commit()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"⬇️ {episode_info} | Download Here", url=button_link)]])
 
     try:
