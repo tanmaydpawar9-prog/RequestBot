@@ -1,0 +1,61 @@
+import logging
+import time
+import traceback
+import psycopg2
+
+from aiogram import Router, F
+from aiogram.filters import Command
+from aiogram.types import Message, ErrorEvent
+
+from config import bot, ADMIN_ID, ADS_BOT_ID, DATABASE_URL
+from utils import extract_ad_url
+
+common_router = Router()
+
+@common_router.error()
+async def global_error_handler(event: ErrorEvent):
+    """Catches all errors and sends a message to the Admin for debugging."""
+    logging.error(f"Update: {event.update}\nException: {event.exception}")
+    traceback.print_exception(type(event.exception), event.exception, event.exception.__traceback__)
+    
+    if ADMIN_ID:
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🚨 <b>BOT ERROR!</b>\n\n<code>{event.exception}</code>\n\nCheck Render logs for full details."
+            )
+        except Exception:
+            pass
+
+@common_router.channel_post()
+async def track_channel_ads(message: Message):
+    """Monitors any channel the bot is in to automatically log ads."""
+    # Only track messages sent by the designated ads bot.
+    if not ADS_BOT_ID or not message.via_bot or message.via_bot.id != ADS_BOT_ID:
+        return
+
+    ad_url = extract_ad_url(message)
+    if ad_url:
+        with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM ads WHERE message_id = %s", (message.message_id,))
+                if not cursor.fetchone():
+                    cursor.execute("INSERT INTO ads (channel_id, message_id, url, timestamp) VALUES (%s, %s, %s, %s)",
+                                   (message.chat.id, message.message_id, ad_url, time.time()))
+                    logging.info(f"✨ New ad registered automatically from Ads Bot: {ad_url}")
+
+@common_router.message(Command("ping"))
+async def ping_handler(message: Message):
+    """Simple command to test if the bot is alive."""
+    await message.answer("🏓 Pong! The bot is online and actively receiving messages.")
+
+@common_router.message()
+async def catch_all(message: Message):
+    """Catches unhandled messages and provides helpful feedback, especially to the admin."""
+    if message.from_user.id == ADMIN_ID and message.chat.type == 'private':
+        if message.text:
+            if message.text.startswith('/post'):
+                return await message.reply("⚠️ <b>Command Error:</b>\nTo use <code>/post</code>, you must <b>reply</b> to a forwarded message that contains a photo and caption.")
+            if message.text.startswith('/addad'):
+                return await message.reply("⚠️ <b>Command Error:</b>\nTo use <code>/addad</code>, you must <b>reply</b> to a forwarded ad message.")
+        return
