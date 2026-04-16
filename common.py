@@ -3,7 +3,7 @@ import time
 import traceback
 import psycopg2
 import asyncio
-
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, ErrorEvent, ChatJoinRequest
@@ -56,11 +56,28 @@ async def handle_join_requests(request: ChatJoinRequest):
             cursor.execute("SELECT 1 FROM backup_channels WHERE channel_id = %s", (request.chat.id,))
             if cursor.fetchone():
                 logging.info(f"Storing join request from user {request.from_user.id} for channel {request.chat.id}")
+                
+                # Retrieve the original context stored when the user was prompted to join
+                cursor.execute("SELECT original_start_args, original_user_message_id FROM pending_join_requests WHERE chat_id = %s AND user_id = %s",
+                               (request.chat.id, request.from_user.id))
+                stored_context = cursor.fetchone()
+
                 cursor.execute("""
-                    INSERT INTO pending_join_requests (chat_id, user_id, timestamp) VALUES (%s, %s, %s)
-                    ON CONFLICT(chat_id, user_id) DO NOTHING
+                    INSERT INTO pending_join_requests (chat_id, user_id, timestamp, original_start_args, original_user_message_id) VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT(chat_id, user_id) DO UPDATE SET timestamp = EXCLUDED.timestamp, original_start_args = EXCLUDED.original_start_args, original_user_message_id = EXCLUDED.original_user_message_id
                 """, (request.chat.id, request.from_user.id, time.time()))
                 conn.commit()
+
+                if stored_context:
+                    original_start_args = stored_context[0]
+                    # Send a message to the user with a button to continue
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="✅ Your request has been sent! Click here to continue.", callback_data=f"continue_flow_{original_start_args}")]
+                    ])
+                    try:
+                        await bot.send_message(request.from_user.id, "<b>Backup Channel Join Request Received!</b>", reply_markup=keyboard)
+                    except Exception as e:
+                        logging.error(f"Failed to send continue message to user {request.from_user.id}: {e}")
 
 @common_router.message(Command("ping"))
 async def ping_handler(message: Message):

@@ -15,6 +15,41 @@ from utils import cleanup_unclicked_request, delete_message_later
 
 user_router = Router()
 
+async def _process_start_args_internal(user_id: int, user_full_name: str, raw_args: str, original_user_message_id: int):
+    """Internal helper to process start arguments after all checks."""
+    if raw_args.startswith("post_"):
+        # Reconstruct parts for handle_post_deep_link logic
+        parts = raw_args.split("_")
+        if len(parts) < 3:
+            await bot.send_message(user_id, "❌ Invalid post link format.")
+            return
+        
+        # Create a dummy Message object to pass to handle_post_deep_link
+        # This is necessary because handle_post_deep_link expects a Message object
+        # for various properties like from_user, chat, and message_id.
+        dummy_message = Message(
+            message_id=original_user_message_id, # Use the original message ID for context
+            from_user=types.User(id=user_id, is_bot=False, first_name=user_full_name),
+            chat=types.Chat(id=user_id, type='private'),
+            date=datetime.now(), # Current time
+            text=f"/start {raw_args}" # Reconstruct the command text
+        )
+        await handle_post_deep_link(dummy_message, raw_args)
+        
+    else: # It's a subtitle file hash
+        file_hash = raw_args
+        await proceed_with_verification(user_id, user_full_name, file_hash, original_user_message_id)
+
+async def _check_backup_channel_and_proceed(message: Message, raw_args: str):
+    """
+    Checks backup channel membership and proceeds if allowed.
+    Returns True if allowed to proceed, False if blocked.
+    """
+    user_id = message.from_user.id
+    user_full_name = message.from_user.full_name
+    original_user_message_id = message.message_id
+
+    # --- Backup Channel Check ---
 async def proceed_with_verification(chat_id: int, user_full_name: str, file_hash: str, user_msg_id: int):
     """Handles the ad forwarding and verification message sending."""
     request_key = f"{chat_id}_{file_hash}"
@@ -92,7 +127,6 @@ async def handle_post_deep_link(message: Message, raw_args: str):
     
     message_id = parts[-1]
     username = "_".join(parts[1:-1])
-    user_id = message.from_user.id
 
     # --- NEW: Backup Channel Check ---
     active_backup_channel = None
@@ -100,6 +134,7 @@ async def handle_post_deep_link(message: Message, raw_args: str):
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute("SELECT channel_id, full_name FROM backup_channels WHERE is_active = TRUE LIMIT 1")
             active_backup_channel = cursor.fetchone()
+    user_id = message.from_user.id
 
     if active_backup_channel:
         is_member = False
@@ -123,10 +158,13 @@ async def handle_post_deep_link(message: Message, raw_args: str):
                                    (active_backup_channel['channel_id'], user_id))
                     is_pending = cursor.fetchone()
 
-            # If no pending request is found, prompt the user to send one.
+            # If no pending request is found, prompt the user to send one and store context.
             if not is_pending:
+                # Store context before prompting to join
+                link_type = "post" if raw_args.startswith("post_") else "subtitle"
                 try:
                     chat = await bot.get_chat(active_backup_channel['channel_id'])
+                    
                     invite_link = chat.invite_link
                     if not invite_link:
                         invite_link = await bot.export_chat_invite_link(active_backup_channel['channel_id'])
@@ -138,12 +176,21 @@ async def handle_post_deep_link(message: Message, raw_args: str):
                         "<b>❗️ Access Requirement</b>\n\n"
                         "To get this content, you must send a join request to our backup channel.\n\n"
                         "1. Click the button below to send a request.\n"
-                        "2. After sending the request, click the original link again to proceed.",
+                        "2. Once your request is sent, we will notify you to continue.", # Changed text
                         reply_markup=keyboard
                     )
                     asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                    
+                    # Store the context in pending_join_requests
+                    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+                        with conn.cursor() as cursor:
+                            cursor.execute("""
+                                INSERT INTO pending_join_requests (chat_id, user_id, timestamp, original_start_args, original_user_message_id)
+                                VALUES (%s, %s, %s, %s, %s) ON CONFLICT(chat_id, user_id) DO UPDATE SET timestamp = EXCLUDED.timestamp, original_start_args = EXCLUDED.original_start_args, original_user_message_id = EXCLUDED.original_user_message_id
+                            """, (active_backup_channel['channel_id'], user_id, time.time(), raw_args, message.message_id))
+                            conn.commit()
                     return # Block the user
-                except Exception as e_link:
+                except Exception as e_link: #
                     logging.error(f"Failed to get invite link for backup channel {active_backup_channel['channel_id']}: {e_link}")
                     msg = await message.answer("<b>System Error</b>\n\nCould not generate a join link. Please contact an admin.")
                     asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
@@ -151,6 +198,11 @@ async def handle_post_deep_link(message: Message, raw_args: str):
     # --- End of Backup Channel Check ---
 
     link = f"https://t.me/{username}/{message_id}"
+    
+    # If the user is a member, or has a pending request (and thus allowed to proceed),
+    # then continue with the original /post deep link logic.
+    if not active_backup_channel or is_member or is_pending:
+        pass # Proceed with the rest of the function
 
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
@@ -158,7 +210,7 @@ async def handle_post_deep_link(message: Message, raw_args: str):
             all_channels = cursor.fetchall()
     
     if not all_channels:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💥 Download Episode", url=link)]])
         msg = await message.answer("Here is your requested episode:", reply_markup=keyboard)
         return
         
@@ -187,7 +239,7 @@ async def handle_post_deep_link(message: Message, raw_args: str):
         member = await bot.get_chat_member(req_channel_id, user_id)
         # If user is already a member of the required channel, give the link directly
         if member.status not in ['left', 'kicked', 'restricted']:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Download Episode", url=link)]])
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❤️‍🔥 Download Episode", url=link)]])
             msg = await message.answer("Thank you for being a member! Here is your episode:", reply_markup=keyboard)
             return
     except Exception as e:
@@ -211,15 +263,15 @@ async def handle_post_deep_link(message: Message, raw_args: str):
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"1. Join {channel_full_name} 🚀", url=invite_link)],
-            [InlineKeyboardButton(text="2. Download Episode ⬇️", callback_data=callback_data)]
+            [InlineKeyboardButton(text="2. I Have Joined ✅", callback_data=callback_data)]
         ])
         msg = await message.answer("<b>Join Required!</b>\n\nPlease join the following channel to get your episode link. 👇", reply_markup=keyboard)
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
     except Exception as e_final:
         logging.error(f"Failed to get invite link or show join prompt for {req_channel_id}: {e_final}")
-        msg = await message.answer("❌ <b>System Error:</b> Could not verify channel membership. Please make sure the bot is added as an administrator to all registered force-join channels.")
+        msg = await message.answer("❌ <b>System Error:</b> Could not verify channel membership. 🌐Please Report To Admin @CosmicAtomic")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
-
+    return False # Blocked by force-join channel
 @user_router.message(CommandStart())
 async def handle_start(message: Message, command: CommandStart):
     """Handles the user clicking the deep link."""
@@ -231,9 +283,6 @@ async def handle_start(message: Message, command: CommandStart):
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
 
-    if raw_args.startswith("post_"):
-        return await handle_post_deep_link(message, raw_args)
-
     file_hash = raw_args
     user_id = message.from_user.id
 
@@ -243,6 +292,7 @@ async def handle_start(message: Message, command: CommandStart):
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute("SELECT channel_id, full_name FROM backup_channels WHERE is_active = TRUE LIMIT 1")
             active_backup_channel = cursor.fetchone()
+    user_id = message.from_user.id
 
     if active_backup_channel:
         is_member = False
@@ -266,10 +316,13 @@ async def handle_start(message: Message, command: CommandStart):
                                    (active_backup_channel['channel_id'], user_id))
                     is_pending = cursor.fetchone()
 
-            # If no pending request is found, prompt the user to send one.
+            # If no pending request is found, prompt the user to send one and store context.
             if not is_pending:
+                # Store context before prompting to join
+                link_type = "post" if raw_args.startswith("post_") else "subtitle"
                 try:
                     chat = await bot.get_chat(active_backup_channel['channel_id'])
+                    
                     invite_link = chat.invite_link
                     if not invite_link:
                         invite_link = await bot.export_chat_invite_link(active_backup_channel['channel_id'])
@@ -281,12 +334,21 @@ async def handle_start(message: Message, command: CommandStart):
                         "<b>❗️ Access Requirement</b>\n\n"
                         "To use this bot, you must send a join request to our backup channel.\n\n"
                         "1. Click the button below to send a request.\n"
-                        "2. After sending the request, click the original link again to proceed.",
+                        "2. Once your request is sent, we will notify you to continue.", # Changed text
                         reply_markup=keyboard
                     )
                     asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                    
+                    # Store the context in pending_join_requests
+                    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+                        with conn.cursor() as cursor:
+                            cursor.execute("""
+                                INSERT INTO pending_join_requests (chat_id, user_id, timestamp, original_start_args, original_user_message_id)
+                                VALUES (%s, %s, %s, %s, %s) ON CONFLICT(chat_id, user_id) DO UPDATE SET timestamp = EXCLUDED.timestamp, original_start_args = EXCLUDED.original_start_args, original_user_message_id = EXCLUDED.original_user_message_id
+                            """, (active_backup_channel['channel_id'], user_id, time.time(), raw_args, message.message_id))
+                            conn.commit()
                     return # Block the user
-                except Exception as e_link:
+                except Exception as e_link: #
                     logging.error(f"Failed to get invite link for backup channel {active_backup_channel['channel_id']}: {e_link}")
                     msg = await message.answer("<b>System Error</b>\n\nCould not generate a join link. Please contact an admin.")
                     asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
@@ -294,7 +356,10 @@ async def handle_start(message: Message, command: CommandStart):
     # --- End of Backup Channel Check ---
 
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
-        with conn.cursor() as cursor:
+        with conn.cursor() as cursor: #
+            # If the user is a member, or has a pending request (and thus allowed to proceed),
+            # then continue with the original /start deep link logic.
+            # This check is now done within _check_backup_channel_and_proceed
             cursor.execute("SELECT file_id FROM files WHERE hash = %s", (file_hash,))
             if not cursor.fetchone():
                 msg = await message.answer("This file link is invalid or has expired.")
@@ -318,7 +383,30 @@ async def handle_start(message: Message, command: CommandStart):
         except Exception as e:
             logging.error(f"Could not check channel membership for {user_id}: {e}")
 
-    await proceed_with_verification(user_id, message.from_user.full_name, file_hash, message.message_id)
+    # If the user is a member, or has a pending request (and thus allowed to proceed),
+    # then continue with the original /start deep link logic.
+    if not active_backup_channel or is_member or is_pending:
+        await _process_start_args_internal(user_id, user_full_name, raw_args, original_user_message_id)
+
+@user_router.callback_query(F.data.startswith("continue_flow_"))
+async def handle_continue_flow(callback: CallbackQuery):
+    """Handles the 'Continue' button after a backup channel join request."""
+    await callback.answer("Continuing...", show_alert=False)
+    start_args = callback.data.split("continue_flow_", 1)[1]
+    user_id = callback.from_user.id
+    user_full_name = callback.from_user.full_name
+
+    # Retrieve the original user message ID from the database
+    original_user_message_id = 0
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT original_user_message_id FROM pending_join_requests WHERE user_id = %s", (user_id,))
+            result = cursor.fetchone()
+            if result:
+                original_user_message_id = result[0]
+                cursor.execute("DELETE FROM pending_join_requests WHERE user_id = %s", (user_id,)) # Clean up
+                conn.commit()
+    await _process_start_args_internal(user_id, user_full_name, start_args, original_user_message_id)
 
 @user_router.callback_query(F.data.startswith("get_"))
 async def serve_file(callback: CallbackQuery):
