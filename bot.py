@@ -3,9 +3,9 @@ import logging
 from aiohttp import web
 
 from config import bot, dp, PORT
-from handlers.admin import admin_router
-from handlers.user import user_router
-from handlers.common import common_router
+from admin import admin_router
+from user import user_router
+from common import common_router
 from webapp import track_click, health_check
 
 # --- Startup Logic ---

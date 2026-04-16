@@ -2,13 +2,14 @@ import logging
 import time
 import traceback
 import psycopg2
+import asyncio
 
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, ErrorEvent
 
 from config import bot, ADMIN_ID, ADS_BOT_ID, DATABASE_URL
-from utils import extract_ad_url
+from utils import extract_ad_url, delete_message_later
 
 common_router = Router()
 
@@ -20,10 +21,11 @@ async def global_error_handler(event: ErrorEvent):
     
     if ADMIN_ID:
         try:
-            await bot.send_message(
+            msg = await bot.send_message(
                 ADMIN_ID,
                 f"🚨 <b>BOT ERROR!</b>\n\n<code>{event.exception}</code>\n\nCheck Render logs for full details."
             )
+            asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         except Exception:
             pass
 
@@ -47,7 +49,8 @@ async def track_channel_ads(message: Message):
 @common_router.message(Command("ping"))
 async def ping_handler(message: Message):
     """Simple command to test if the bot is alive."""
-    await message.answer("🏓 Pong! The bot is online and actively receiving messages.")
+    msg = await message.answer("🏓 Pong! The bot is online and actively receiving messages.")
+    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
 @common_router.message()
 async def catch_all(message: Message):
@@ -55,7 +58,11 @@ async def catch_all(message: Message):
     if message.from_user.id == ADMIN_ID and message.chat.type == 'private':
         if message.text:
             if message.text.startswith('/post'):
-                return await message.reply("⚠️ <b>Command Error:</b>\nTo use <code>/post</code>, you must <b>reply</b> to a forwarded message that contains a photo and caption.")
+                msg = await message.reply("⚠️ <b>Command Error:</b>\nTo use <code>/post</code>, you must <b>reply</b> to a forwarded message that contains a photo and caption.")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                return
             if message.text.startswith('/addad'):
-                return await message.reply("⚠️ <b>Command Error:</b>\nTo use <code>/addad</code>, you must <b>reply</b> to a forwarded ad message.")
+                msg = await message.reply("⚠️ <b>Command Error:</b>\nTo use <code>/addad</code>, you must <b>reply</b> to a forwarded ad message.")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                return
         return

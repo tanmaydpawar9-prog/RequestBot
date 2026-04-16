@@ -5,6 +5,7 @@ import uuid
 import logging
 import psycopg2
 import psycopg2.extras
+import asyncio
 
 from aiogram import Router, F
 from aiogram.enums import ParseMode
@@ -13,7 +14,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, ChatMemberOwner, ChatMemberAdministrator
 
 from config import bot, ADMIN_ID, DESTINATION_CHANNEL_ID, DATABASE_URL, admin_temp_state
-from utils import extract_channel_short_name_from_filename, extract_ad_url
+from utils import extract_channel_short_name_from_filename, extract_ad_url, delete_message_later
 
 admin_router = Router()
 
@@ -22,7 +23,9 @@ async def set_channel_command(message: Message):
     """Admin command to register a channel with a short name."""
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
-        return await message.answer("Usage: `/setchannel <short_name> <channel_id_or_username>`\n\nExample: `/setchannel RI @RenegadeImmoral` or `/setchannel SS -1001234567890`", parse_mode=ParseMode.MARKDOWN)
+        msg = await message.answer("Usage: `/setchannel <short_name> <channel_id_or_username>`\n\nExample: `/setchannel RI @RenegadeImmoral` or `/setchannel SS -1001234567890`", parse_mode=ParseMode.MARKDOWN)
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     short_name = args[1].upper()
     channel_identifier = args[2]
@@ -34,18 +37,23 @@ async def set_channel_command(message: Message):
         full_name = chat.title
 
         if chat.type != 'channel':
-            return await message.answer("❌ The provided ID/username does not belong to a channel.")
+            msg = await message.answer("❌ The provided ID/username does not belong to a channel.")
+            asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+            return
 
         with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
             with conn.cursor() as cursor:
                 cursor.execute("INSERT INTO channels (short_name, channel_id, full_name) VALUES (%s, %s, %s) ON CONFLICT (short_name) DO UPDATE SET channel_id = EXCLUDED.channel_id, full_name = EXCLUDED.full_name",
                                (short_name, channel_id, full_name))
                 conn.commit()
-        await message.answer(f"✅ Channel '{full_name}' registered as '{short_name}' (ID: <code>{channel_id}</code>).")
+        msg = await message.answer(f"✅ Channel '{full_name}' registered as '{short_name}' (ID: <code>{channel_id}</code>).")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
     except TelegramNotFound:
-        await message.answer("❌ Channel not found. Make sure the bot is an admin in the channel and the ID/username is correct.")
+        msg = await message.answer("❌ Channel not found. Make sure the bot is an admin in the channel and the ID/username is correct.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
     except Exception as e:
-        await message.answer(f"❌ An error occurred: {e}")
+        msg = await message.answer(f"❌ An error occurred: {e}")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
 @admin_router.callback_query(F.data.startswith("post_to_channel_"), F.from_user.id == ADMIN_ID)
 async def post_to_channel_callback(callback: CallbackQuery):
@@ -68,7 +76,9 @@ async def post_to_channel_callback(callback: CallbackQuery):
             channel_data = cursor.fetchone()
 
             if not channel_data:
-                return await callback.message.answer(f"❌ Channel '{short_name}' not found in database. Please register it first.")
+                msg = await callback.message.answer(f"❌ Channel '{short_name}' not found in database. Please register it first.")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                return
 
             target_channel_id = channel_data['channel_id']
             channel_full_name = channel_data['full_name']
@@ -104,11 +114,14 @@ async def post_to_channel_callback(callback: CallbackQuery):
                     text=caption_text, # Use the newly constructed text
                     reply_markup=keyboard,
                 )
-                await callback.message.answer(f"✅ Subtitle for '<b>{original_filename}</b>' posted to channel '<b>{channel_full_name}</b>'!")
+                msg = await callback.message.answer(f"✅ Subtitle for '<b>{original_filename}</b>' posted to channel '<b>{channel_full_name}</b>'!")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
             except TelegramBadRequest as e:
-                await callback.message.answer(f"❌ Failed to post to channel '<b>{channel_full_name}</b>'. Error: {e}\n\nMake sure the bot is an admin in the channel and has permission to post messages.")
+                msg = await callback.message.answer(f"❌ Failed to post to channel '<b>{channel_full_name}</b>'. Error: {e}\n\nMake sure the bot is an admin in the channel and has permission to post messages.")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
             except Exception as e:
-                await callback.message.answer(f"❌ An unexpected error occurred while posting: {e}")
+                msg = await callback.message.answer(f"❌ An unexpected error occurred while posting: {e}")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
 @admin_router.message(Command("stats"), F.from_user.id == ADMIN_ID)
 async def view_stats(message: Message):
@@ -121,7 +134,9 @@ async def view_stats(message: Message):
             tot_succ = totals[1] or 0
  
             if tot_req == 0:
-                return await message.answer("📊 No file requests have been made yet.")
+                msg = await message.answer("📊 No file requests have been made yet.")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                return
  
             success_rate = (tot_succ / tot_req * 100) if tot_req > 0 else 0
  
@@ -181,7 +196,8 @@ async def view_stats(message: Message):
  
     text = "\n".join(lines)
     text = text.replace('<', '&lt;').replace('>', '&gt;')
-    await message.answer(f"<code>{text}</code>")
+    msg = await message.answer(f"<code>{text}</code>")
+    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
 @admin_router.message(Command("getdata"), F.from_user.id == ADMIN_ID)
 async def get_data_pdf(message: Message):
@@ -195,10 +211,12 @@ async def get_data_pdf(message: Message):
         from reportlab.lib.enums import TA_CENTER, TA_LEFT
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable
     except ImportError:
-        return await message.answer(
+        msg = await message.answer(
             "❌ <b>reportlab</b> is not installed.\n"
             "Add <code>reportlab</code> to your <code>requirements.txt</code> and redeploy."
         )
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     status_msg = await message.answer("⏳ Generating PDF report…")
 
@@ -211,7 +229,9 @@ async def get_data_pdf(message: Message):
 
             if tot_req == 0:
                 await status_msg.delete()
-                return await message.answer("📊 No data yet to export.")
+                msg = await message.answer("📊 No data yet to export.")
+                asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                return
 
             success_rate = (tot_succ / tot_req * 100) if tot_req > 0 else 0
 
@@ -329,11 +349,12 @@ async def get_data_pdf(message: Message):
 
     ts_file = time.strftime('%Y%m%d_%H%M', time.gmtime())
     await status_msg.delete()
-    await bot.send_document(
+    msg = await bot.send_document(
         message.chat.id,
         BufferedInputFile(buffer.read(), filename=f"frictionrealm_stats_{ts_file}.pdf"),
         caption=f"📊 <b>TheFrictionRealm Stats</b>\n<i>{ts_display}</i>",
     )
+    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
 @admin_router.message(F.document, F.from_user.id == ADMIN_ID)
 async def handle_admin_upload(message: Message):
@@ -373,11 +394,15 @@ async def handle_admin_upload(message: Message):
                     
                     try:
                         await bot.send_message(chat_id=target_channel_id, text=caption_text, reply_markup=keyboard)
-                        return await message.answer(f"✅ Subtitle for '<b>{original_filename}</b>' automatically posted to channel '<b>{channel_full_name}</b>'!")
+                        msg = await message.answer(f"✅ Subtitle for '<b>{original_filename}</b>' automatically posted to channel '<b>{channel_full_name}</b>'!")
+                        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+                        return
                     except TelegramBadRequest as e:
-                        await message.answer(f"❌ Failed to auto-post to channel '<b>{channel_full_name}</b>'. Error: {e}\n\nFalling back to manual selection.")
+                        msg = await message.answer(f"❌ Failed to auto-post to channel '<b>{channel_full_name}</b>'. Error: {e}\n\nFalling back to manual selection.")
+                        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
                     except Exception as e:
-                        await message.answer(f"❌ An unexpected error occurred during auto-post: {e}\n\nFalling back to manual selection.")
+                        msg = await message.answer(f"❌ An unexpected error occurred during auto-post: {e}\n\nFalling back to manual selection.")
+                        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
     admin_temp_state[message.from_user.id] = {'file_hash': file_hash, 'file_name': original_filename}
 
@@ -389,23 +414,29 @@ async def handle_admin_upload(message: Message):
                 channels_keyboard_buttons.append([InlineKeyboardButton(text=f"{row['short_name']} ({row['full_name']})", callback_data=f"post_to_channel_{row['short_name']}")])
     
     if not channels_keyboard_buttons:
-        return await message.answer(f"✅ File '<b>{original_filename}</b>' uploaded.\n\n⚠️ No channels registered. Use `/setchannel` to add one.")
+        msg = await message.answer(f"✅ File '<b>{original_filename}</b>' uploaded.\n\n⚠️ No channels registered. Use `/setchannel` to add one.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
-    await message.answer(
+    msg = await message.answer(
         f"✅ File '<b>{original_filename}</b>' uploaded!\n\nSelect the channel to post to:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=channels_keyboard_buttons),
     )
+    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
 @admin_router.message(F.document)
 async def handle_unauthorized_upload(message: Message):
     """Catches document uploads from non-admins."""
-    await message.answer("🚫 <b>Access Denied</b>\n\nYou are not authorized to upload files.")
+    msg = await message.answer("🚫 <b>Access Denied</b>\n\nYou are not authorized to upload files.")
+    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
 @admin_router.message(Command("check_dest"), F.from_user.id == ADMIN_ID)
 async def check_destination_channel(message: Message):
     """Admin command to verify the bot can access the destination channel."""
     if not DESTINATION_CHANNEL_ID:
-        return await message.answer("⚠️ `DESTINATION_CHANNEL_ID` is not set.")
+        msg = await message.answer("⚠️ `DESTINATION_CHANNEL_ID` is not set.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     try:
         chat = await bot.get_chat(DESTINATION_CHANNEL_ID)
@@ -418,20 +449,23 @@ async def check_destination_channel(message: Message):
 
         perm_text = "✅ Can post messages" if can_post else "❌ Cannot post messages"
         
-        await message.answer(
+        msg = await message.answer(
             f"✅ <b>Destination Channel Check: OK</b>\n\n"
             f"<b>Name:</b> {chat.title}\n<b>ID:</b> <code>{chat.id}</code>\n"
             f"<b>Bot Status:</b> {status}\n<b>Permissions:</b> {perm_text}"
         )
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
     except TelegramNotFound:
-        await message.answer(
+        msg = await message.answer(
             f"🚨 <b>Destination Channel Check: FAILED</b>\n\n"
             f"Could not find channel ID: <code>{DESTINATION_CHANNEL_ID}</code>.\n\n"
             f"<b>Fix:</b>\n1. Ensure `DESTINATION_CHANNEL_ID` is correct.\n"
             f"2. Add the bot to the channel as an admin."
         )
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
     except Exception as e:
-        await message.answer(f"An unexpected error occurred: {e}")
+        msg = await message.answer(f"An unexpected error occurred: {e}")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
 @admin_router.message(Command("editbutton"), F.from_user.id == ADMIN_ID, F.reply_to_message)
 async def edit_inline_button(message: Message):
@@ -439,22 +473,32 @@ async def edit_inline_button(message: Message):
     forwarded_message = message.reply_to_message
     
     if not DESTINATION_CHANNEL_ID:
-        return await message.reply("⚠️ `DESTINATION_CHANNEL_ID` is not set.")
+        msg = await message.reply("⚠️ `DESTINATION_CHANNEL_ID` is not set.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     if not forwarded_message.forward_from_chat or forwarded_message.forward_from_chat.id != DESTINATION_CHANNEL_ID:
-        return await message.reply(f"❌ The forwarded message must be from the destination channel (ID: <code>{DESTINATION_CHANNEL_ID}</code>).")
+        msg = await message.reply(f"❌ The forwarded message must be from the destination channel (ID: <code>{DESTINATION_CHANNEL_ID}</code>).")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     if not forwarded_message.forward_from or forwarded_message.forward_from.id != (await bot.me()).id:
-        return await message.reply("❌ The forwarded message must be one originally posted by this bot.")
+        msg = await message.reply("❌ The forwarded message must be one originally posted by this bot.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     command_args = message.text.split(' ', 1)
     if len(command_args) < 2 or '|' not in command_args[1]:
-        return await message.reply("❌ Usage: `/editbutton New Text | https://new.link`", parse_mode=ParseMode.MARKDOWN_V2)
+        msg = await message.reply("❌ Usage: `/editbutton New Text | https://new.link`", parse_mode=ParseMode.MARKDOWN_V2)
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     button_text, url = [arg.strip() for arg in command_args[1].split('|', 1)]
 
     if not button_text or not url or not url.startswith("https://"):
-        return await message.reply("❌ Invalid format. Button text and a valid https URL are required.")
+        msg = await message.reply("❌ Invalid format. Button text and a valid https URL are required.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     new_keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=button_text, url=url)]])
 
@@ -464,10 +508,12 @@ async def edit_inline_button(message: Message):
             message_id=forwarded_message.forward_from_message_id,
             reply_markup=new_keyboard
         )
-        await message.reply("✅ Inline button updated!")
+        msg = await message.reply("✅ Inline button updated!")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
     except Exception as e:
         logging.error(f"Failed to edit inline button. Error: {e}")
-        await message.reply(f"🚨 Failed to update button: <code>{e}</code>")
+        msg = await message.reply(f"🚨 Failed to update button: <code>{e}</code>")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
 @admin_router.message(Command("post"), F.from_user.id == ADMIN_ID, F.reply_to_message)
 async def post_forwarded_message(message: Message):
@@ -475,22 +521,32 @@ async def post_forwarded_message(message: Message):
     forwarded_message = message.reply_to_message
 
     if not forwarded_message.forward_from_chat:
-        return await message.reply("❌ This command only works when replying to a forwarded message from a channel.")
+        msg = await message.reply("❌ This command only works when replying to a forwarded message from a channel.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     if not forwarded_message.photo or not forwarded_message.caption:
-        return await message.reply("❌ The forwarded message must contain a photo and a caption.")
+        msg = await message.reply("❌ The forwarded message must contain a photo and a caption.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     if not DESTINATION_CHANNEL_ID:
-        return await message.reply("⚠️ `DESTINATION_CHANNEL_ID` is not set.")
+        msg = await message.reply("⚠️ `DESTINATION_CHANNEL_ID` is not set.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     episode_match = re.search(r'\b(EP\d+|S\d+E\d+)\b', forwarded_message.caption, re.IGNORECASE)
     if not episode_match:
-        return await message.reply(f"❌ No episode pattern (e.g., EP123) found in the caption.")
+        msg = await message.reply(f"❌ No episode pattern (e.g., EP123) found in the caption.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
     
     episode_info = episode_match.group(0).upper()
     original_chat = forwarded_message.forward_from_chat
     if not original_chat.username:
-        return await message.reply(f"❌ The source channel (<code>{original_chat.id}</code>) must be public.")
+        msg = await message.reply(f"❌ The source channel (<code>{original_chat.id}</code>) must be public.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
         
     # Check if there are any force-join channels registered
     has_channels = False
@@ -521,16 +577,19 @@ async def post_forwarded_message(message: Message):
             message_id=copied_message.message_id,
             reply_markup=keyboard
         )
-        await message.reply(f"✅ Successfully posted to channel <code>{DESTINATION_CHANNEL_ID}</code>.")
+        msg = await message.reply(f"✅ Successfully posted to channel <code>{DESTINATION_CHANNEL_ID}</code>.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
     except TelegramBadRequest as e:
         logging.error(f"Failed to post forwarded message. Error: {e}")
         reply_text = f"🚨 <b>Posting Failed!</b>\n\nError: <code>{e}</code>\n\n"
         if "chat not found" in str(e).lower():
             reply_text += "<b>Suggestion:</b> Ensure `DESTINATION_CHANNEL_ID` is correct and the bot is an admin in the channel."
-        await message.reply(reply_text)
+        msg = await message.reply(reply_text)
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
     except Exception as e:
         logging.error(f"Failed to post forwarded message. Error: {e}")
-        await message.reply(f"🚨 <b>An unexpected error occurred!</b>\n\nError: <code>{e}</code>")
+        msg = await message.reply(f"🚨 <b>An unexpected error occurred!</b>\n\nError: <code>{e}</code>")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
 
 @admin_router.message(Command("addad"), F.from_user.id == ADMIN_ID, F.reply_to_message)
 async def register_previous_ad_command(message: Message):
@@ -538,7 +597,9 @@ async def register_previous_ad_command(message: Message):
     forwarded_message = message.reply_to_message
 
     if not forwarded_message.forward_from_chat or forwarded_message.forward_from_chat.type != 'channel':
-        return await message.reply("❌ This command only works when replying to a message forwarded from a channel.")
+        msg = await message.reply("❌ This command only works when replying to a message forwarded from a channel.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
+        return
 
     ad_url = extract_ad_url(forwarded_message)
     if ad_url:
@@ -550,8 +611,11 @@ async def register_previous_ad_command(message: Message):
                 cursor.execute("SELECT 1 FROM ads WHERE message_id = %s AND channel_id = %s", (orig_msg_id, channel_id))
                 if not cursor.fetchone():
                     cursor.execute("INSERT INTO ads (channel_id, message_id, url, timestamp) VALUES (%s, %s, %s, %s)", (channel_id, orig_msg_id, ad_url, time.time()))
-                    await message.reply(f"✅ Ad (ID: {orig_msg_id}) successfully registered!")
+                    msg = await message.reply(f"✅ Ad (ID: {orig_msg_id}) successfully registered!")
+                    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
                 else:
-                    await message.reply("⚠️ This ad is already in the database.")
+                    msg = await message.reply("⚠️ This ad is already in the database.")
+                    asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
     else:
-        await message.reply("❌ No URL found in the replied message.")
+        msg = await message.reply("❌ No URL found in the replied message.")
+        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
