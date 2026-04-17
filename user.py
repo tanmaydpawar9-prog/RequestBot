@@ -214,16 +214,9 @@ async def handle_post_deep_link(message: Message, raw_args: str):
     
     # If no force-join channels, just serve content and exit
     if not all_channels:
-        if raw_args.startswith("post_content_"):
-            content_hash = raw_args.split("post_content_", 1)[1]
-            await _serve_posted_content(user_id, content_hash)
-        else: # old link
-            parts = raw_args.split("_")
-            message_id = parts[-1]
-            username = "_".join(parts[1:-1])
-            link = f"https://t.me/{username}/{message_id}"
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💥 Download Episode", url=link)]])
-            await bot.send_message(user_id, "Here is your requested episode:", reply_markup=keyboard)
+        # This is a configuration error. The /post feature requires at least one force-join channel.
+        logging.error(f"User {user_id} clicked a /post link, but no force-join channels are configured in the 'channels' table.")
+        await bot.send_message(user_id, "❌ This link is currently unavailable due to a server configuration issue. Please try again later.")
         return
         
     # Select a channel from cache or random
@@ -244,10 +237,26 @@ async def handle_post_deep_link(message: Message, raw_args: str):
     is_member = False
     try:
         member = await bot.get_chat_member(req_channel_id, user_id)
+        # Explicitly log the status for debugging
+        logging.info(f"Force-join check for user {user_id} in channel {req_channel_id} ({channel_full_name}). User status: {member.status}")
+        
+        # A user is considered a member if they are not left, kicked, or restricted.
         if member.status not in ['left', 'kicked', 'restricted']:
             is_member = True
+            
+    except TelegramNotFound:
+        # This can happen if the user has blocked the bot. We can't check, so we treat them as not a member.
+        logging.warning(f"Could not find user {user_id} when checking membership for channel {req_channel_id}. They may have blocked the bot.")
+        is_member = False
+        
+    except TelegramBadRequest as e:
+        # This usually means the bot is not an admin in the channel.
+        logging.warning(f"Could not check membership for channel {req_channel_id}, bot is likely not an admin. Proceeding with join prompt. Error: {e}")
+        is_member = False
+
     except Exception as e:
-        logging.warning(f"Could not check membership for channel {req_channel_id}, likely not admin. Proceeding with join prompt. Error: {e}")
+        logging.error(f"An unexpected error occurred during membership check for user {user_id} in channel {req_channel_id}. Error: {e}")
+        is_member = False
     
     # If member, serve content
     if is_member:

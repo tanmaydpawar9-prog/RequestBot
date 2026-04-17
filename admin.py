@@ -625,12 +625,7 @@ async def post_forwarded_message(message: Message):
         return
     
     episode_info = episode_match.group(0).upper()
-    original_chat = forwarded_message.forward_from_chat
-    if not original_chat.username:
-        msg = await message.reply(f"❌ The source channel (<code>{original_chat.id}</code>) must be public.")
-        asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
-        return
-        
+    
     # Always store the photo and caption in the database for robust links.
     # The force-join check will happen in user.py when the link is clicked.
     content_hash = uuid.uuid4().hex[:8]
