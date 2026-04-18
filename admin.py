@@ -645,7 +645,7 @@ async def post_forwarded_message(message: Message):
                 cursor.execute("""
                     INSERT INTO posted_content (hash, file_id, caption, timestamp, channel_id, message_id)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, (content_hash, forwarded_message.photo[-1].file_id, forwarded_message.caption, time.time(), copied_message.chat.id, copied_message.message_id))
+                """, (content_hash, forwarded_message.photo[-1].file_id, forwarded_message.caption, time.time(), DESTINATION_CHANNEL_ID, copied_message.message_id))
                 conn.commit()
         await bot.edit_message_reply_markup(
             chat_id=DESTINATION_CHANNEL_ID,
