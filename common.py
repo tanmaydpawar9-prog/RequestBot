@@ -36,12 +36,16 @@ async def track_channel_ads(message: Message):
     if not ADS_BOT_ID:
         return
 
-    # A message from a bot in a channel is often a forwarded message.
-    # The `from_user` field is typically null for channel posts from other bots, so we check `forward_from` instead.
-    is_ad_bot = False
-    if (message.forward_from and message.forward_from.id == ADS_BOT_ID) or \
-       (message.via_bot and message.via_bot.id == ADS_BOT_ID):
-        is_ad_bot = True
+    # To identify a message from the ad bot in a channel, we must check multiple fields.
+    # 1. `sender_chat`: This is the most reliable method. When a bot posts in a channel,
+    #    this field contains the Chat object for that bot.
+    # 2. `forward_from`: If the ad bot is a user account that forwards messages.
+    # 3. `via_bot`: If the message is sent via an inline bot.
+    is_ad_bot = (
+        (message.sender_chat and message.sender_chat.id == ADS_BOT_ID) or
+        (message.forward_from and message.forward_from.id == ADS_BOT_ID) or
+        (message.via_bot and message.via_bot.id == ADS_BOT_ID)
+    )
 
     if not is_ad_bot:
         return
