@@ -40,6 +40,13 @@ if DATABASE_URL:
                 cursor.execute('''CREATE TABLE IF NOT EXISTS channels (short_name TEXT PRIMARY KEY, channel_id BIGINT UNIQUE, full_name TEXT)''') # Ensure this is created
                 # New tables for backup channel feature
                 cursor.execute('''CREATE TABLE IF NOT EXISTS posted_content (hash TEXT PRIMARY KEY, file_id TEXT, caption TEXT, timestamp REAL)''')
+                # Add channel_id and message_id for robust post linking
+                cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='posted_content' AND column_name='channel_id'")
+                if not cursor.fetchone():
+                    cursor.execute("ALTER TABLE posted_content ADD COLUMN channel_id BIGINT")
+                cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='posted_content' AND column_name='message_id'")
+                if not cursor.fetchone():
+                    cursor.execute("ALTER TABLE posted_content ADD COLUMN message_id BIGINT")
                 cursor.execute('''CREATE TABLE IF NOT EXISTS backup_channels (channel_id BIGINT PRIMARY KEY, full_name TEXT, is_active BOOLEAN DEFAULT FALSE)''') #
                 cursor.execute('''CREATE TABLE IF NOT EXISTS pending_join_requests (chat_id BIGINT, user_id BIGINT, timestamp REAL, original_start_args TEXT, original_user_message_id BIGINT, PRIMARY KEY(chat_id, user_id))''') #
 

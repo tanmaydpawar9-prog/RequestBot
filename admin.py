@@ -631,14 +631,6 @@ async def post_forwarded_message(message: Message):
     content_hash = uuid.uuid4().hex[:8]
     bot_info = await bot.me()
     button_link = f"https://t.me/{bot_info.username}?start=post_content_{content_hash}" # New robust link
-
-    # Store the photo and caption in the database (already validated to exist by earlier checks)
-    # forwarded_message.photo[-1].file_id and forwarded_message.caption are guaranteed to exist here.
-    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
-        with conn.cursor() as cursor:
-            cursor.execute("INSERT INTO posted_content (hash, file_id, caption, timestamp) VALUES (%s, %s, %s, %s)",
-                           (content_hash, forwarded_message.photo[-1].file_id, forwarded_message.caption, time.time()))
-            conn.commit()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"⬇️ {episode_info} | Download Here", url=button_link)]])
 
     try:
@@ -647,6 +639,14 @@ async def post_forwarded_message(message: Message):
             from_chat_id=forwarded_message.chat.id,
             message_id=forwarded_message.message_id
         )
+        # Store information about the new post for robust linking
+        with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO posted_content (hash, file_id, caption, timestamp, channel_id, message_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (content_hash, forwarded_message.photo[-1].file_id, forwarded_message.caption, time.time(), copied_message.chat.id, copied_message.message_id))
+                conn.commit()
         await bot.edit_message_reply_markup(
             chat_id=DESTINATION_CHANNEL_ID,
             message_id=copied_message.message_id,
