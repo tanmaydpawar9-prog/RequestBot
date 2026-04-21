@@ -608,13 +608,14 @@ async def post_forwarded_message(message: Message):
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
 
-    if not forwarded_message.photo or not forwarded_message.caption:
-        msg = await message.reply("❌ The forwarded message must contain a photo and a caption.")
+    # Ensure we have the original message ID to link back to.
+    if not forwarded_message.forward_from_message_id:
+        msg = await message.reply("❌ This command only works on messages that were directly forwarded from a channel, not copied.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
 
-    if not DESTINATION_CHANNEL_ID:
-        msg = await message.reply("⚠️ `DESTINATION_CHANNEL_ID` is not set.")
+    if not forwarded_message.photo or not forwarded_message.caption:
+        msg = await message.reply("❌ The forwarded message must contain a photo and a caption.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
 
@@ -623,16 +624,15 @@ async def post_forwarded_message(message: Message):
         msg = await message.reply(f"❌ No episode pattern (e.g., EP123) found in the caption.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return
-    
+
     episode_info = episode_match.group(0).upper()
-    
+
     # Always store the photo and caption in the database for robust links.
     # The force-join check will happen in user.py when the link is clicked.
     content_hash = uuid.uuid4().hex[:8]
     bot_info = await bot.me()
     button_link = f"https://t.me/{bot_info.username}?start=post_content_{content_hash}" # New robust link
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"⬇️ {episode_info} | Download Here", url=button_link)]])
-
     try:
         # Use copy_message to send an exact copy of the forwarded message,
         # but with our new download button attached. This preserves the original message perfectly.
@@ -642,13 +642,19 @@ async def post_forwarded_message(message: Message):
             message_id=forwarded_message.message_id,
             reply_markup=keyboard,
         )
-        # Store information about the new post for robust linking
+        
+        # --- CRITICAL CHANGE ---
+        # Store the location of the ORIGINAL forwarded post, not the new one we just made.
+        # This ensures the final download button points back to the source post.
+        original_channel_id = forwarded_message.forward_from_chat.id
+        original_message_id = forwarded_message.forward_from_message_id
+
         with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
                     INSERT INTO posted_content (hash, file_id, caption, timestamp, channel_id, message_id)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, (content_hash, forwarded_message.photo[-1].file_id, forwarded_message.caption, time.time(), DESTINATION_CHANNEL_ID, sent_message.message_id))
+                """, (content_hash, forwarded_message.photo[-1].file_id, forwarded_message.caption, time.time(), original_channel_id, original_message_id))
                 conn.commit()
         msg = await message.reply(f"✅ Successfully posted to channel <code>{DESTINATION_CHANNEL_ID}</code>.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
