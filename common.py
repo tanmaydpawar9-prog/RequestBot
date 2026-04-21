@@ -2,6 +2,7 @@ import logging
 import time
 import traceback
 import psycopg2
+import psycopg2.extras
 import asyncio
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram import Router, F
@@ -10,6 +11,7 @@ from aiogram.types import Message, ErrorEvent, ChatJoinRequest
 
 from config import bot, ADMIN_ID, ADS_BOT_ID, DATABASE_URL
 from utils import extract_ad_url, delete_message_later
+from user import _process_start_args_internal
 
 common_router = Router()
 
@@ -30,20 +32,18 @@ async def global_error_handler(event: ErrorEvent):
             pass
 
 @common_router.channel_post()
+@common_router.edited_channel_post()
 async def track_channel_ads(message: Message):
     """Monitors any channel the bot is in to automatically log ads."""
     # Only track messages sent by the designated ads bot.
     if not ADS_BOT_ID:
         return
 
-    # To identify a message from the ad bot in a channel, we must check multiple fields.
-    # 1. `sender_chat`: This is the most reliable method. When a bot posts in a channel,
-    #    this field contains the Chat object for that bot.
-    # 2. `forward_from`: If the ad bot is a user account that forwards messages.
-    # 3. `via_bot`: If the message is sent via an inline bot.
     is_ad_bot = (
+        (message.from_user and message.from_user.id == ADS_BOT_ID) or
         (message.sender_chat and message.sender_chat.id == ADS_BOT_ID) or
         (message.forward_from and message.forward_from.id == ADS_BOT_ID) or
+        (message.forward_from_chat and message.forward_from_chat.id == ADS_BOT_ID) or
         (message.via_bot and message.via_bot.id == ADS_BOT_ID)
     )
 
@@ -63,34 +63,38 @@ async def track_channel_ads(message: Message):
 
 @common_router.chat_join_request()
 async def handle_join_requests(request: ChatJoinRequest):
-    """Stores a user's request to join a channel, so it can be approved later."""
+    """Handles a join request, and if context is found, automatically proceeds with the user's original action."""
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             # Check if it's a backup channel we should be tracking
             cursor.execute("SELECT 1 FROM backup_channels WHERE channel_id = %s", (request.chat.id,))
-            if cursor.fetchone():
-                logging.info(f"Storing join request from user {request.from_user.id} for channel {request.chat.id}")
-                
-                # Retrieve the original context to build a continue link
-                cursor.execute("SELECT original_start_args FROM pending_join_requests WHERE chat_id = %s AND user_id = %s",
-                               (request.chat.id, request.from_user.id))
-                stored_context = cursor.fetchone()
+            if not cursor.fetchone():
+                return # Not a channel we manage
 
-                if stored_context and stored_context['original_start_args']:
-                    original_start_args = stored_context['original_start_args']
-                    bot_info = await bot.me()
-                    continue_link = f"https://t.me/{bot_info.username}?start={original_start_args}"
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Request Sent! Click here to continue.", url=continue_link)]])
-                    try:
-                        await bot.send_message(request.from_user.id, "<b>Your request has been sent!</b>\n\nYou can now proceed to get your content.", reply_markup=keyboard)
-                    except Exception as e:
-                        logging.error(f"Failed to send continue message to user {request.from_user.id}: {e}")
-                else:
-                    # Fallback if context is missing
-                    try:
-                        await bot.send_message(request.from_user.id, "<b>Request Received!</b>\n\nPlease go back and click the original link again to continue.")
-                    except Exception as e:
-                        logging.error(f"Failed to send fallback 'request received' message to user {request.from_user.id}: {e}")
+            logging.info(f"Received join request from user {request.from_user.id} for channel {request.chat.id}. Proceeding automatically.")
+            
+            # Retrieve the original context to auto-proceed
+            cursor.execute("SELECT original_start_args, original_user_message_id FROM pending_join_requests WHERE chat_id = %s AND user_id = %s",
+                           (request.chat.id, request.from_user.id))
+            stored_context = cursor.fetchone()
+
+            if stored_context and stored_context['original_start_args']:
+                user_id = request.from_user.id
+                user_full_name = request.from_user.full_name
+                raw_args = stored_context['original_start_args']
+                original_user_message_id = stored_context['original_user_message_id']
+                
+                try:
+                    await bot.send_message(user_id, "<b>Request Sent!</b>\n\nYou can now proceed to the next step.")
+                    await _process_start_args_internal(user_id, user_full_name, raw_args, original_user_message_id)
+                except Exception as e:
+                    logging.error(f"Failed to auto-proceed for user {user_id} after join request: {e}")
+            else:
+                # Fallback if context is missing
+                try:
+                    await bot.send_message(request.from_user.id, "<b>Request Received!</b>\n\nYour request is now pending. Please go back and click the original link again to continue.")
+                except Exception as e:
+                    logging.error(f"Failed to send fallback 'request received' message to user {request.from_user.id}: {e}")
 
 @common_router.message(Command("ping"))
 async def ping_handler(message: Message):

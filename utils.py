@@ -61,7 +61,10 @@ def extract_ad_url(message: Message):
             if entity.type == 'text_link':
                 return entity.url
             elif entity.type == 'url':
-                return text[entity.offset:entity.offset+entity.length]
+                try:
+                    return entity.extract_from(text)
+                except AttributeError:
+                    return text[entity.offset:entity.offset+entity.length]
     return None
 
 def clean_filename_for_display(filename: str) -> str:
