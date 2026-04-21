@@ -18,6 +18,8 @@ from utils import cleanup_unclicked_request, delete_message_later
 
 user_router = Router()
 
+BACKUP_CHANNEL_LINK_CACHE = {"channel_id": None, "link": None}
+
 # --- Database Functions (Synchronous) ---
 # These functions are designed to be run in a separate thread to avoid blocking the event loop.
 
@@ -182,14 +184,24 @@ async def _handle_backup_channel_check(message: Message, raw_args: str):
         return True # Allow the user
 
     # User is not a member and has no pending request. Prompt to join.
+    global BACKUP_CHANNEL_LINK_CACHE
     try:
-        chat = await bot.get_chat(active_backup_channel['channel_id'])
-        invite_link = chat.invite_link
-        if not invite_link:
-            invite_link = await bot.export_chat_invite_link(active_backup_channel['channel_id'])
+        req_channel_id = active_backup_channel['channel_id']
         
+        if BACKUP_CHANNEL_LINK_CACHE["channel_id"] == req_channel_id and BACKUP_CHANNEL_LINK_CACHE["link"]:
+            invite_link_url = BACKUP_CHANNEL_LINK_CACHE["link"]
+        else:
+            # We MUST create a link that requires admin approval for the backup channel workflow to function properly.
+            invite_link = await bot.create_chat_invite_link(
+                req_channel_id,
+                creates_join_request=True
+            )
+            invite_link_url = invite_link.invite_link
+            BACKUP_CHANNEL_LINK_CACHE["channel_id"] = req_channel_id
+            BACKUP_CHANNEL_LINK_CACHE["link"] = invite_link_url
+            
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"➡️ Request to Join {active_backup_channel['full_name']}", url=invite_link)]
+            [InlineKeyboardButton(text=f"➡️ Request to Join {active_backup_channel['full_name']}", url=invite_link_url)]
         ])
         msg = await message.answer(
             "<b>❗️ Access Requirement</b>\n\n"
@@ -201,11 +213,11 @@ async def _handle_backup_channel_check(message: Message, raw_args: str):
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         
         # Store the context in pending_join_requests
-        await asyncio.to_thread(db_store_pending_join_request, active_backup_channel['channel_id'], user_id, raw_args, message.message_id)
+        await asyncio.to_thread(db_store_pending_join_request, req_channel_id, user_id, raw_args, message.message_id)
         return False # Block the user
     except Exception as e_link:
         logging.error(f"Failed to get invite link for backup channel {active_backup_channel['channel_id']}: {e_link}")
-        msg = await message.answer("<b>System Error</b>\n\nCould not generate a join link. Please contact an admin.")
+        msg = await message.answer("<b>System Error</b>\n\nCould not generate a join request link. Ensure the bot has 'Invite Users via Link' permission in the backup channel.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return False # Block user
 
