@@ -50,6 +50,16 @@ if DATABASE_URL:
                 cursor.execute('''CREATE TABLE IF NOT EXISTS backup_channels (channel_id BIGINT PRIMARY KEY, full_name TEXT, is_active BOOLEAN DEFAULT FALSE)''') #
                 cursor.execute('''CREATE TABLE IF NOT EXISTS pending_join_requests (chat_id BIGINT, user_id BIGINT, timestamp REAL, original_start_args TEXT, original_user_message_id BIGINT, PRIMARY KEY(chat_id, user_id))''') #
 
+                # Add original_start_args to pending_join_requests if it doesn't exist
+                cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='pending_join_requests' AND column_name='original_start_args'")
+                if not cursor.fetchone():
+                    cursor.execute("ALTER TABLE pending_join_requests ADD COLUMN original_start_args TEXT")
+
+                # Add original_user_message_id to pending_join_requests if it doesn't exist (for backward compatibility)
+                cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='pending_join_requests' AND column_name='original_user_message_id'")
+                if not cursor.fetchone():
+                    cursor.execute("ALTER TABLE pending_join_requests ADD COLUMN original_user_message_id BIGINT")
+
                 # Statistics Tables
                 cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, name TEXT, total_requests INTEGER DEFAULT 0, successful_receives INTEGER DEFAULT 0)''')
                 cursor.execute('''CREATE TABLE IF NOT EXISTS user_file_requests (user_id BIGINT, file_hash TEXT, count INTEGER DEFAULT 0, PRIMARY KEY(user_id, file_hash))''')

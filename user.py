@@ -212,14 +212,19 @@ async def _handle_backup_channel_check(message: Message, raw_args: str):
         )
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         
-        # Store the context in pending_join_requests
-        await asyncio.to_thread(db_store_pending_join_request, req_channel_id, user_id, raw_args, message.message_id)
-        return False # Block the user
     except Exception as e_link:
         logging.error(f"Failed to get invite link for backup channel {active_backup_channel['channel_id']}: {e_link}")
         msg = await message.answer("<b>System Error</b>\n\nCould not generate a join request link. Ensure the bot has 'Invite Users via Link' permission in the backup channel.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
         return False # Block user
+
+    # Store the context in pending_join_requests safely outside the link try/except block
+    try:
+        await asyncio.to_thread(db_store_pending_join_request, req_channel_id, user_id, raw_args, message.message_id)
+    except Exception as e_db:
+        logging.error(f"Database error storing join request context: {e_db}")
+
+    return False # Block the user
 
 async def _process_start_args_internal(user_id: int, user_full_name: str, raw_args: str, original_user_message_id: int):
     """Internal helper to process start arguments after all checks."""
