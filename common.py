@@ -65,33 +65,32 @@ async def track_channel_ads(message: Message):
 async def handle_join_requests(request: ChatJoinRequest):
     """Stores a user's request to join a channel, so it can be approved later."""
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
-        with conn.cursor() as cursor:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             # Check if it's a backup channel we should be tracking
             cursor.execute("SELECT 1 FROM backup_channels WHERE channel_id = %s", (request.chat.id,))
             if cursor.fetchone():
                 logging.info(f"Storing join request from user {request.from_user.id} for channel {request.chat.id}")
                 
-                # Retrieve the original context stored when the user was prompted to join
-                cursor.execute("SELECT original_start_args, original_user_message_id FROM pending_join_requests WHERE chat_id = %s AND user_id = %s",
+                # Retrieve the original context to build a continue link
+                cursor.execute("SELECT original_start_args FROM pending_join_requests WHERE chat_id = %s AND user_id = %s",
                                (request.chat.id, request.from_user.id))
                 stored_context = cursor.fetchone()
 
-                cursor.execute("""
-                    INSERT INTO pending_join_requests (chat_id, user_id, timestamp, original_start_args, original_user_message_id) VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT(chat_id, user_id) DO UPDATE SET timestamp = EXCLUDED.timestamp, original_start_args = EXCLUDED.original_start_args, original_user_message_id = EXCLUDED.original_user_message_id
-                """, (request.chat.id, request.from_user.id, time.time()))
-                conn.commit()
-
-                if stored_context:
-                    original_start_args = stored_context[0]
-                    # Send a message to the user with a button to continue
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="✅ Your request has been sent! Click here to continue.", callback_data=f"continue_flow_{original_start_args}")]
-                    ])
+                if stored_context and stored_context['original_start_args']:
+                    original_start_args = stored_context['original_start_args']
+                    bot_info = await bot.me()
+                    continue_link = f"https://t.me/{bot_info.username}?start={original_start_args}"
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Request Sent! Click here to continue.", url=continue_link)]])
                     try:
-                        await bot.send_message(request.from_user.id, "<b>Backup Channel Join Request Received!</b>", reply_markup=keyboard)
+                        await bot.send_message(request.from_user.id, "<b>Your request has been sent!</b>\n\nYou can now proceed to get your content.", reply_markup=keyboard)
                     except Exception as e:
                         logging.error(f"Failed to send continue message to user {request.from_user.id}: {e}")
+                else:
+                    # Fallback if context is missing
+                    try:
+                        await bot.send_message(request.from_user.id, "<b>Request Received!</b>\n\nPlease go back and click the original link again to continue.")
+                    except Exception as e:
+                        logging.error(f"Failed to send fallback 'request received' message to user {request.from_user.id}: {e}")
 
 @common_router.message(Command("ping"))
 async def ping_handler(message: Message):

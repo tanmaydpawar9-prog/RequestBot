@@ -83,18 +83,6 @@ def db_get_all_force_join_channels():
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute("SELECT short_name, channel_id, full_name FROM channels ORDER BY channel_id")
             return cursor.fetchall()
-
-def db_get_continue_flow_context(user_id: int):
-    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT original_user_message_id FROM pending_join_requests WHERE user_id = %s", (user_id,))
-            result = cursor.fetchone()
-            if result:
-                cursor.execute("DELETE FROM pending_join_requests WHERE user_id = %s", (user_id,))
-                conn.commit()
-                return result[0]
-    return 0
-
 def db_verify_and_get_file(request_key: str, user_id: int, file_hash: str):
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
@@ -190,7 +178,8 @@ async def _handle_backup_channel_check(message: Message, raw_args: str):
     is_pending = await asyncio.to_thread(db_is_join_request_pending, active_backup_channel['channel_id'], user_id)
     
     if is_pending:
-        return True # User has a pending request, proceed as normal
+        # User has a pending request, so allow them to proceed to the next step.
+        return True # Allow the user
 
     # User is not a member and has no pending request. Prompt to join.
     try:
@@ -342,7 +331,6 @@ async def handle_post_deep_link(message: Message, raw_args: str):
     # If member, serve content
     if is_member:
         if raw_args.startswith("post_content_"):
-            await bot.send_message(user_id, "Thank you for being a member! Here is your content:")
             content_hash = raw_args.split("post_content_", 1)[1]
             await _serve_posted_content(user_id, content_hash)
         else: # old link
@@ -393,18 +381,6 @@ async def handle_start(message: Message, command: CommandStart):
     # If allowed to proceed, then process the start arguments
     await _process_start_args_internal(user_id, user_full_name, raw_args, original_user_message_id)
 
-@user_router.callback_query(F.data.startswith("continue_flow_"))
-async def handle_continue_flow(callback: CallbackQuery):
-    """Handles the 'Continue' button after a backup channel join request."""
-    await callback.answer("Continuing...", show_alert=False)
-    start_args = callback.data.split("continue_flow_", 1)[1]
-    user_id = callback.from_user.id
-    user_full_name = callback.from_user.full_name
-
-    # Retrieve the original user message ID from the database
-    original_user_message_id = await asyncio.to_thread(db_get_continue_flow_context, user_id)
-    await _process_start_args_internal(user_id, user_full_name, start_args, original_user_message_id)
-
 @user_router.callback_query(F.data.startswith("get_"))
 async def serve_file(callback: CallbackQuery):
     """Verifies the ad click and serves the file if valid."""
@@ -447,7 +423,10 @@ async def serve_file(callback: CallbackQuery):
                 await status_msg.edit_text("❌ A critical error occurred while sending the file. Please report this to an admin.")
                 return
 
-        await bot.delete_message(user_id, status_msg.message_id)
+        try:
+            await bot.delete_message(user_id, status_msg.message_id)
+        except Exception:
+            pass
         
         for m_id in {callback.message.message_id, req.get('user_msg_id'), req.get('bot_fwd_msg_id')}:
             if m_id:
@@ -467,13 +446,20 @@ async def handle_join_verification(callback: CallbackQuery):
 
     if not DESTINATION_CHANNEL_ID:
         await callback.answer("This check is no longer required.", show_alert=True)
-        return await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        return
 
     try:
         member = await bot.get_chat_member(DESTINATION_CHANNEL_ID, user_id)
         if member.status not in ['left', 'kicked']:
             await callback.answer("Thank you for joining! Please wait... 🙏", show_alert=False)
-            await callback.message.delete()
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
             await proceed_with_verification(user_id, callback.from_user.full_name, file_hash, 0)
         else:
             await callback.answer("❌ You haven't joined the channel yet. Please join and click again.", show_alert=True)
@@ -506,7 +492,10 @@ async def handle_post_join_check(callback: CallbackQuery):
 
     # If check passes, serve content
     await callback.answer("Thank you for joining!", show_alert=False)
-    await callback.message.delete() # Clean up the join prompt
+    try:
+        await callback.message.delete() # Clean up the join prompt
+    except Exception:
+        pass
     
     if raw_args.startswith("post_content_"):
         await callback.message.answer("✅ Verification successful! Here is your content:")

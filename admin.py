@@ -634,10 +634,13 @@ async def post_forwarded_message(message: Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"⬇️ {episode_info} | Download Here", url=button_link)]])
 
     try:
-        copied_message = await bot.copy_message(
+        # Use copy_message to send an exact copy of the forwarded message,
+        # but with our new download button attached. This preserves the original message perfectly.
+        sent_message = await bot.copy_message(
             chat_id=DESTINATION_CHANNEL_ID,
             from_chat_id=forwarded_message.chat.id,
-            message_id=forwarded_message.message_id
+            message_id=forwarded_message.message_id,
+            reply_markup=keyboard,
         )
         # Store information about the new post for robust linking
         with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
@@ -645,13 +648,8 @@ async def post_forwarded_message(message: Message):
                 cursor.execute("""
                     INSERT INTO posted_content (hash, file_id, caption, timestamp, channel_id, message_id)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, (content_hash, forwarded_message.photo[-1].file_id, forwarded_message.caption, time.time(), DESTINATION_CHANNEL_ID, copied_message.message_id))
+                """, (content_hash, forwarded_message.photo[-1].file_id, forwarded_message.caption, time.time(), DESTINATION_CHANNEL_ID, sent_message.message_id))
                 conn.commit()
-        await bot.edit_message_reply_markup(
-            chat_id=DESTINATION_CHANNEL_ID,
-            message_id=copied_message.message_id,
-            reply_markup=keyboard
-        )
         msg = await message.reply(f"✅ Successfully posted to channel <code>{DESTINATION_CHANNEL_ID}</code>.")
         asyncio.create_task(delete_message_later(msg.chat.id, msg.message_id, 300))
     except TelegramBadRequest as e:
@@ -706,7 +704,7 @@ async def accept_join_requests(message: Message):
     
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-            cursor.execute("SELECT chat_id, user_id FROM pending_join_requests")
+            cursor.execute("SELECT chat_id, user_id, original_start_args FROM pending_join_requests")
             requests = cursor.fetchall()
             
             if not requests:
@@ -714,10 +712,19 @@ async def accept_join_requests(message: Message):
                 asyncio.create_task(delete_message_later(status_msg.chat.id, status_msg.message_id, 300))
                 return
 
+            bot_info = await bot.me()
             for req in requests:
                 try:
                     await bot.approve_chat_join_request(chat_id=req['chat_id'], user_id=req['user_id'])
                     approved_count += 1
+                    # Notify the user with a direct link to continue
+                    if req['original_start_args']:
+                        try:
+                            continue_link = f"https://t.me/{bot_info.username}?start={req['original_start_args']}"
+                            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ You've been approved! Click here to continue.", url=continue_link)]])
+                            await bot.send_message(req['user_id'], "<b>You're in!</b>\n\nYour request to join the backup channel was approved.", reply_markup=keyboard)
+                        except Exception as e:
+                            logging.warning(f"Could not send approval notification to user {req['user_id']}: {e}")
                 except Exception as e:
                     logging.error(f"Failed to approve join request for user {req['user_id']} in chat {req['chat_id']}: {e}")
                     failed_count += 1
