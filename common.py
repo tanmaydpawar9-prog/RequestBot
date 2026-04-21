@@ -79,6 +79,10 @@ async def handle_join_requests(request: ChatJoinRequest):
             stored_context = cursor.fetchone()
 
             if stored_context and stored_context['original_start_args']:
+                # Update timestamp to -1 to mark it as officially requested!
+                cursor.execute("UPDATE pending_join_requests SET timestamp = -1 WHERE chat_id = %s AND user_id = %s", (request.chat.id, request.from_user.id))
+                conn.commit()
+
                 user_id = request.from_user.id
                 user_full_name = request.from_user.full_name
                 raw_args = stored_context['original_start_args']

@@ -38,7 +38,8 @@ def db_get_active_backup_channel():
 def db_is_join_request_pending(channel_id: int, user_id: int):
     with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM pending_join_requests WHERE chat_id = %s AND user_id = %s", (channel_id, user_id))
+            # Check if timestamp is -1, which means Telegram has officially received the join request
+            cursor.execute("SELECT 1 FROM pending_join_requests WHERE chat_id = %s AND user_id = %s AND timestamp = -1", (channel_id, user_id))
             return cursor.fetchone() is not None
 
 def db_store_pending_join_request(channel_id: int, user_id: int, raw_args: str, message_id: int):
@@ -292,10 +293,10 @@ async def proceed_with_verification(chat_id: int, user_full_name: str, file_hash
     asyncio.create_task(cleanup_unclicked_request(request_key, chat_id, delay=300))
 
 async def handle_post_deep_link(message: Message, raw_args: str):
-    """Handles all post-related deep links, including force-join."""
+    """Handles all post-related deep links, combining backup and random channel checks."""
     user_id = message.from_user.id
     
-    # --- Force-Join Channel Selection Logic ---
+    # --- 1. Random Channel Selection Logic ---
     global POST_FORCE_JOIN_CACHE
     all_channels = await asyncio.to_thread(db_get_all_force_join_channels)
     
@@ -320,33 +321,38 @@ async def handle_post_deep_link(message: Message, raw_args: str):
     req_channel_id = target_channel['channel_id']
     channel_full_name = target_channel['full_name']
     
-    # Check membership
-    is_member = False
+    random_is_member = False
     try:
         member = await bot.get_chat_member(req_channel_id, user_id)
-        # Explicitly log the status for debugging
-        logging.info(f"Force-join check for user {user_id} in channel {req_channel_id} ({channel_full_name}). User status: {member.status}")
-        
-        # A user is considered a member if they are not left, kicked, or restricted.
         if member.status not in ['left', 'kicked', 'restricted']:
-            is_member = True
-            
-    except TelegramNotFound:
-        # This can happen if the user has blocked the bot. We can't check, so we treat them as not a member.
-        logging.warning(f"Could not find user {user_id} when checking membership for channel {req_channel_id}. They may have blocked the bot.")
-        is_member = False
-        
-    except TelegramBadRequest as e:
-        # This usually means the bot is not an admin in the channel.
-        logging.warning(f"Could not check membership for channel {req_channel_id}, bot is likely not an admin. Proceeding with join prompt. Error: {e}")
-        is_member = False
-
+            random_is_member = True
+    except (TelegramNotFound, TelegramBadRequest):
+        pass
     except Exception as e:
-        logging.error(f"An unexpected error occurred during membership check for user {user_id} in channel {req_channel_id}. Error: {e}")
-        is_member = False
+        logging.error(f"Membership check error for channel {req_channel_id}: {e}")
+
+    # --- 2. Backup Channel Logic ---
+    active_backup_channel = await asyncio.to_thread(db_get_active_backup_channel)
+    backup_is_member = True # Default true if no backup channel active
+    backup_channel_id = None
     
-    # If member, serve content
-    if is_member:
+    if active_backup_channel:
+        backup_channel_id = active_backup_channel['channel_id']
+        backup_is_member = False
+        try:
+            member = await bot.get_chat_member(backup_channel_id, user_id)
+            if member.status not in ['left', 'kicked']:
+                backup_is_member = True
+        except Exception:
+            pass
+            
+        if not backup_is_member:
+            is_pending = await asyncio.to_thread(db_is_join_request_pending, backup_channel_id, user_id)
+            if is_pending:
+                backup_is_member = True
+
+    # --- 3. Serve Content if Both Satisfied ---
+    if random_is_member and backup_is_member:
         if raw_args.startswith("post_content_"):
             content_hash = raw_args.split("post_content_", 1)[1]
             await _serve_posted_content(user_id, content_hash)
@@ -359,21 +365,47 @@ async def handle_post_deep_link(message: Message, raw_args: str):
             await bot.send_message(user_id, "Thank you for being a member! Here is your episode:", reply_markup=keyboard)
         return
 
-    # If not member, show join prompt
-    try:
-        chat = await bot.get_chat(req_channel_id)
-        invite_link = chat.invite_link or await bot.export_chat_invite_link(req_channel_id)
-        
-        callback_data = f"cp_check|{req_short_name}|{raw_args}"
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"1. Join {channel_full_name} 🚀", url=invite_link)],
-            [InlineKeyboardButton(text="2. I Have Joined ✅", callback_data=callback_data)]
-        ])
-        await bot.send_message(user_id, "<b>Join Required!</b>\n\nPlease join the following channel to get your episode link. 👇", reply_markup=keyboard)
-    except Exception as e_final:
-        logging.error(f"Failed to get invite link or show join prompt for {req_channel_id}: {e_final}")
-        await bot.send_message(user_id, "❌ <b>System Error:</b> Could not verify channel membership. 🌐Please Report To Admin @CosmicAtomic")
+    # --- 4. Show Combined Join Prompt ---
+    keyboard_buttons = []
+    
+    if active_backup_channel and not backup_is_member:
+        global BACKUP_CHANNEL_LINK_CACHE
+        try:
+            if BACKUP_CHANNEL_LINK_CACHE["channel_id"] == backup_channel_id and BACKUP_CHANNEL_LINK_CACHE["link"]:
+                backup_invite_link = BACKUP_CHANNEL_LINK_CACHE["link"]
+            else:
+                invite_link = await bot.create_chat_invite_link(backup_channel_id, creates_join_request=True)
+                backup_invite_link = invite_link.invite_link
+                BACKUP_CHANNEL_LINK_CACHE["channel_id"] = backup_channel_id
+                BACKUP_CHANNEL_LINK_CACHE["link"] = backup_invite_link
+                
+            keyboard_buttons.append([InlineKeyboardButton(text=f"1. Request to Join {active_backup_channel['full_name']} 🔒", url=backup_invite_link)])
+            await asyncio.to_thread(db_store_pending_join_request, backup_channel_id, user_id, raw_args, message.message_id)
+        except Exception as e_link:
+            logging.error(f"Failed backup link generation: {e_link}")
+
+    if not random_is_member:
+        try:
+            chat = await bot.get_chat(req_channel_id)
+            random_invite_link = chat.invite_link or await bot.export_chat_invite_link(req_channel_id)
+            btn_prefix = "2." if (active_backup_channel and not backup_is_member) else "1."
+            keyboard_buttons.append([InlineKeyboardButton(text=f"{btn_prefix} Join {channel_full_name} 🚀", url=random_invite_link)])
+        except Exception as e_final:
+            logging.error(f"Failed random link generation: {e_final}")
+            
+    if not keyboard_buttons:
+        await bot.send_message(user_id, "❌ <b>System Error:</b> Could not verify channel membership. 🌐Please Report To Admin")
+        return
+
+    callback_data = f"cp_check|{req_short_name}|{raw_args}"
+    btn_prefix_check = "3." if (active_backup_channel and not backup_is_member and not random_is_member) else "2."
+    keyboard_buttons.append([InlineKeyboardButton(text=f"{btn_prefix_check} I Have Joined ✅", callback_data=callback_data)])
+    
+    await bot.send_message(
+        user_id, 
+        "<b>Join Required!</b>\n\nPlease join the following channels to get your episode link. 👇", 
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    )
 
 @user_router.message(CommandStart())
 async def handle_start(message: Message, command: CommandStart):
@@ -390,7 +422,12 @@ async def handle_start(message: Message, command: CommandStart):
     user_full_name = message.from_user.full_name
     original_user_message_id = message.message_id
 
-    # Perform backup channel check
+    # Deep link for a post! Bypass _handle_backup_channel_check and let handle_post_deep_link handle both combined.
+    if raw_args.startswith("post_"):
+        await _process_start_args_internal(user_id, user_full_name, raw_args, original_user_message_id)
+        return
+
+    # Perform backup channel check for subtitle links
     can_proceed = await _handle_backup_channel_check(message, raw_args)
     if not can_proceed:
         return # Blocked by backup channel check
@@ -494,18 +531,39 @@ async def handle_post_join_check(callback: CallbackQuery):
     _, req_short_name, raw_args = parts
     user_id = callback.from_user.id
     
+    # 1. Verify Random Channel
     channel_row = await asyncio.to_thread(db_get_channel_by_short_name, req_short_name)
     if not channel_row:
-        return await callback.answer("The required channel is no longer registered.", show_alert=True)
+        return await callback.answer("The required public channel is no longer registered.", show_alert=True)
 
     req_channel_id = channel_row['channel_id']
 
     try:
         member = await bot.get_chat_member(req_channel_id, user_id)
         if member.status in ['left', 'kicked', 'restricted']:
-            return await callback.answer("❌ You haven't joined the required channel yet. Please join and try again.", show_alert=True)
+            return await callback.answer("❌ You haven't joined the public channel yet. Please join and try again.", show_alert=True)
     except Exception:
         return await callback.answer("❌ Configuration Error: The bot must be an admin in the channel to verify membership.", show_alert=True)
+
+    # 2. Verify Backup Channel
+    active_backup_channel = await asyncio.to_thread(db_get_active_backup_channel)
+    if active_backup_channel:
+        backup_channel_id = active_backup_channel['channel_id']
+        backup_is_member = False
+        try:
+            member = await bot.get_chat_member(backup_channel_id, user_id)
+            if member.status not in ['left', 'kicked']:
+                backup_is_member = True
+        except Exception:
+            pass
+            
+        if not backup_is_member:
+            is_pending = await asyncio.to_thread(db_is_join_request_pending, backup_channel_id, user_id)
+            if is_pending:
+                backup_is_member = True
+        
+        if not backup_is_member:
+            return await callback.answer("❌ You haven't requested to join the backup channel yet.", show_alert=True)
 
     # If check passes, serve content
     await callback.answer("Thank you for joining!", show_alert=False)
